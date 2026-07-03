@@ -848,27 +848,27 @@ function applySprm(props, sprm, val, size) {
       break;
     case 0xC64E: // sprmPBrcTop
       props.paragraphBorders ??= {};
-      props.paragraphBorders.top = parseBrcOperand(val, "paragraph top border");
+      props.paragraphBorders.top = parseBrcOperand(val, "paragraph top border", { preserveNone: true });
       break;
     case 0xC64F: // sprmPBrcLeft
       props.paragraphBorders ??= {};
-      props.paragraphBorders.left = parseBrcOperand(val, "paragraph left border");
+      props.paragraphBorders.left = parseBrcOperand(val, "paragraph left border", { preserveNone: true });
       break;
     case 0xC650: // sprmPBrcBottom
       props.paragraphBorders ??= {};
-      props.paragraphBorders.bottom = parseBrcOperand(val, "paragraph bottom border");
+      props.paragraphBorders.bottom = parseBrcOperand(val, "paragraph bottom border", { preserveNone: true });
       break;
     case 0xC651: // sprmPBrcRight
       props.paragraphBorders ??= {};
-      props.paragraphBorders.right = parseBrcOperand(val, "paragraph right border");
+      props.paragraphBorders.right = parseBrcOperand(val, "paragraph right border", { preserveNone: true });
       break;
     case 0xC652: // sprmPBrcBetween
       props.paragraphBorders ??= {};
-      props.paragraphBorders.between = parseBrcOperand(val, "paragraph between border");
+      props.paragraphBorders.between = parseBrcOperand(val, "paragraph between border", { preserveNone: true });
       break;
     case 0xC653: // sprmPBrcBar
       props.paragraphBorders ??= {};
-      props.paragraphBorders.bar = parseBrcOperand(val, "paragraph bar border");
+      props.paragraphBorders.bar = parseBrcOperand(val, "paragraph bar border", { preserveNone: true });
       break;
     default:
       break;
@@ -949,15 +949,18 @@ function updateParagraphLeftIndent(props) {
   }
 }
 
-function parseBrcOperand(val, context, { ignoreSpace = false } = {}) {
+function parseBrcOperand(val, context, { ignoreSpace = false, preserveNone = false } = {}) {
   if (!val || val.length < 9 || val[0] !== 8) {
     throw new Error(`Out-of-spec ${context} BrcOperand length ${val?.length ?? 0}`);
   }
   const brc = val.subarray(1, 9);
   const brcType = brc[5];
-  if (brcType === 0) return null;
+  if (brcType === 0 && !preserveNone) return null;
+  // MS-DOC-SPEC/19 BrcOperand contains a Brc, and BrcType 0x00 is
+  // explicitly "No border" / ECMA-376 "none"; paragraph SPRMs can carry
+  // that explicit record and WPS serializes it as a w:pBdr side.
   return {
-    val: brcTypeToBorderName(brcType, context),
+    val: brcType === 0 ? "none" : brcTypeToBorderName(brcType, context),
     color: colorRefToHex(brc.subarray(0, 4)),
     sz: String(brc[4]),
     space: String(ignoreSpace ? 0 : (brc[6] & 0x1f)),

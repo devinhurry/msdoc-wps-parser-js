@@ -397,6 +397,22 @@ test("Selsf selection outside the main story does not force a document.xml _GoBa
   assert.doesNotMatch(xml, /w:name="_GoBack"/);
 });
 
+test("compact header subdocuments emit MS-DOC default/even header-footer references", async () => {
+  const sample9Docx = wpsToDocxBuffer(readWps(await readFile(SAMPLE9_WPS)), { title: "sample9" });
+  const sample9DocumentXml = readDocxDocumentXml(sample9Docx);
+  const sample9RelsXml = readZipEntry(sample9Docx, "word/_rels/document.xml.rels").toString("utf8");
+  assert.match(sample9DocumentXml, /<w:headerReference r:id="rId3" w:type="default"\/>/);
+  assert.match(sample9DocumentXml, /<w:footerReference r:id="rId4" w:type="default"\/>/);
+  assert.match(sample9RelsXml, /Id="rId3"[^>]*relationships\/header"[^>]*Target="header1\.xml"/);
+  assert.match(sample9RelsXml, /Id="rId4"[^>]*relationships\/footer"[^>]*Target="footer1\.xml"/);
+
+  const sample10 = readWps(await readFile(SAMPLE10_WPS));
+  assert.equal(sample10.dop.fFacingPages, true);
+  const sample10DocumentXml = readDocxDocumentXml(wpsToDocxBuffer(sample10, { title: "sample10" }));
+  assert.match(sample10DocumentXml, /<w:footerReference r:id="rId3" w:type="default"\/>/);
+  assert.match(sample10DocumentXml, /<w:footerReference r:id="rId4" w:type="even"\/>/);
+});
+
 test("sample3 styles.xml stays close to WPS expected export", async () => {
   const wps = readWps(await readFile("sample/sample3/original.wps"));
   const docx = wpsToDocxBuffer(wps, { title: "sample3" });
@@ -791,7 +807,7 @@ test("table cell paragraph controls are emitted only from parsed MS-DOC SPRMs", 
   assert.doesNotMatch(paragraph, /<w:adjustRightInd/);
 });
 
-test("parsed table cell paragraph controls are not suppressed by paragraph mark fonts", () => {
+test("parsed table cell paragraph controls are not suppressed by paragraph mark fonts or table autofit", () => {
   const noBorder = { style: "none", width: 0, color: "auto", space: 0 };
   const docx = wpsToDocxBuffer({
     bodyText: "A\r",
@@ -814,6 +830,7 @@ test("parsed table cell paragraph controls are not suppressed by paragraph mark 
       gridCols: [1440],
       tableWidth: 1440,
       tableWidthType: "dxa",
+      tableAutofit: true,
       tableBordersExplicit: false,
       tableBorders: {
         top: noBorder,
@@ -849,6 +866,138 @@ test("parsed table cell paragraph controls are not suppressed by paragraph mark 
   assert.match(paragraph, /<w:bidi w:val="0"\/>/);
   assert.match(paragraph, /<w:adjustRightInd\/>/);
   assert.match(paragraph, /<w:snapToGrid\/>/);
+});
+
+test("paragraph shading follows parsed borders before East Asian controls", () => {
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{
+      paragraphBorders: {
+        top: { val: "none", color: "auto", sz: "0", space: "0" },
+      },
+      paragraphShading: { val: "clear", color: "auto", fill: "FFFFFF" },
+      kinsoku: true,
+    }],
+    characterProperties: [{}, {}],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "paragraph-shading-order" });
+  const paragraph = findParagraphXml(readDocxDocumentXml(docx), "A");
+  assert.ok(paragraph, "paragraph should exist");
+
+  assert.ok(paragraph.indexOf("<w:pBdr>") < paragraph.indexOf("<w:shd "));
+  assert.ok(paragraph.indexOf("<w:shd ") < paragraph.indexOf("<w:kinsoku/>"));
+});
+
+test("MS-DOC NilBrc cell borders are preserved as explicit OOXML nil borders", async () => {
+  const wps = readWps(await readFile(SAMPLE9_WPS));
+  const firstCell = wps.tableRows[0]?.rows[0]?.cells[0];
+  assert.equal(firstCell?.borders?.top?.nil, true);
+  assert.equal(firstCell?.borders?.left?.nil, true);
+  assert.equal(firstCell?.borders?.bottom?.style, "single");
+  assert.equal(firstCell?.noWrap, true);
+
+  const documentXml = readDocxDocumentXml(wpsToDocxBuffer(wps, { title: "sample9" }));
+  assert.match(documentXml, /<w:noWrap\/>/);
+  const firstCellBorders = documentXml.match(/<w:tcBorders>[\s\S]*?<\/w:tcBorders>/)?.[0] ?? "";
+  assert.match(firstCellBorders, /<w:top w:val="nil"\/>/);
+  assert.match(firstCellBorders, /<w:left w:val="nil"\/>/);
+  assert.match(firstCellBorders, /<w:bottom w:val="single" w:color="auto" w:sz="4" w:space="0"\/>/);
+});
+
+test("percentage table width emits cell widths from parsed grid proportions", () => {
+  const noBorder = { style: "none", width: 0, color: "auto", space: 0 };
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\rB\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}, {}],
+    characterProperties: [{}, {}, {}, {}],
+    tableRows: [{
+      cpStart: 0,
+      cpEnd: 4,
+      gridCols: [1000, 2000, 1000],
+      tableWidth: 5000,
+      tableWidthType: "pct",
+      tableBordersExplicit: false,
+      tableBorders: {
+        top: noBorder,
+        left: noBorder,
+        bottom: noBorder,
+        right: noBorder,
+        insideH: noBorder,
+        insideV: noBorder,
+      },
+      rows: [{
+        cells: [{
+          cpStart: 0,
+          cpEnd: 2,
+          width: 3000,
+          gridSpan: 2,
+        }, {
+          cpStart: 2,
+          cpEnd: 4,
+          width: 1000,
+        }],
+      }],
+    }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "pct-table-width" });
+  const xml = readDocxDocumentXml(docx);
+
+  assert.match(xml, /<w:tcW w:w="3750" w:type="pct"\/>/);
+  assert.match(xml, /<w:tcW w:w="1250" w:type="pct"\/>/);
+});
+
+test("table indent from parsed rgdxaCenter margin edge does not synthesize justification", () => {
+  const noBorder = { style: "none", width: 0, color: "auto", space: 0 };
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}],
+    characterProperties: [{}, {}],
+    tableRows: [{
+      cpStart: 0,
+      cpEnd: 2,
+      gridCols: [1440],
+      gridPositions: [-108, 1332],
+      tableIndent: { width: -108, type: "dxa" },
+      cellMargins: { top: 0, left: 108, bottom: 0, right: 108 },
+      tableBordersExplicit: false,
+      tableBorders: {
+        top: noBorder,
+        left: noBorder,
+        bottom: noBorder,
+        right: noBorder,
+        insideH: noBorder,
+        insideV: noBorder,
+      },
+      rows: [{
+        tableJustification: null,
+        cells: [{
+          cpStart: 0,
+          cpEnd: 2,
+          width: 1440,
+        }],
+      }],
+    }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "table-indent-not-jc" });
+  const tableXml = readDocxDocumentXml(docx).match(/<w:tbl>[\s\S]*?<\/w:tbl>/)?.[0] ?? "";
+
+  assert.match(tableXml, /<w:tblInd w:w="0" w:type="dxa"\/>/);
+  assert.doesNotMatch(tableXml, /<w:jc w:val="center"\/>/);
 });
 
 test("sample3 body paragraph keeps one merged run with explicit black shading", async () => {
@@ -1179,6 +1328,31 @@ test("parses MS-DOC character effect toggle SPRMs", () => {
   );
 });
 
+test("run properties emit parsed caps without synthesizing complex-script italic", () => {
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}],
+    characterProperties: [{
+      italic: false,
+      caps: false,
+      fontCs: 1,
+    }, {}],
+    fontTable: [{ name: "Times New Roman" }, { name: "SimSun" }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "parsed-caps" });
+  const paragraph = findParagraphXml(readDocxDocumentXml(docx), "A");
+  assert.ok(paragraph, "paragraph should exist");
+
+  assert.match(paragraph, /<w:i w:val="0"\/>/);
+  assert.match(paragraph, /<w:caps w:val="0"\/>/);
+  assert.doesNotMatch(paragraph, /<w:iCs/);
+});
+
 test("parses and emits MS-DOC character revision mark toggles", () => {
   assert.equal(parseSprms(Buffer.from([0x00, 0x08, 0x01])).revisionMarkDel, true);
   assert.equal(parseSprms(Buffer.from([0x01, 0x08, 0x01])).revisionMarkIns, true);
@@ -1342,6 +1516,14 @@ test("parses MS-DOC character and paragraph border operands", () => {
   assert.deepEqual(parseSprms(Buffer.from([
     0x25, 0x64, 0x00, 0x00, 0x00, 0x00, // sprmPBrcLeft80: explicit none border
   ])).paragraphBorders.left, {
+    val: "none",
+    color: "auto",
+    sz: "0",
+    space: "0",
+  });
+  assert.deepEqual(parseSprms(Buffer.from([
+    0x4e, 0xc6, 0x08, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00, // sprmPBrcTop: explicit none border
+  ])).paragraphBorders.top, {
     val: "none",
     color: "auto",
     sz: "0",
@@ -1643,7 +1825,7 @@ test("emits parsed MS-DOC character effect toggles to DOCX run properties", () =
   assert.ok(run.indexOf("<w:effect ") < run.indexOf("<w:bdr "));
   assert.ok(run.indexOf("<w:bdr ") < run.indexOf("<w:fitText "));
   assert.ok(run.indexOf("<w:fitText ") < run.indexOf("<w:vertAlign "));
-  assert.match(xml, /<w:pPr><w:suppressAutoHyphens\/><w:shd w:val="solid" w:color="AABBCC" w:fill="123456"\/><w:mirrorIndents\/><\/w:pPr>/);
+  assert.match(xml, /<w:pPr><w:shd w:val="solid" w:color="AABBCC" w:fill="123456"\/><w:suppressAutoHyphens\/><w:mirrorIndents\/><\/w:pPr>/);
 });
 
 test("emits explicit MS-DOC sprmCIss normal as OOXML baseline", () => {

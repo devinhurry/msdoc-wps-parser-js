@@ -656,8 +656,17 @@ function createFooterReferencePlan(wpsDocument = {}, sections = []) {
     const headerText = wpsDocument.subdocuments?.headers?.rawText ?? "";
 	    if (sections.length === 1 && (onlySection.docGridType === 1 || onlySection.docGridType === 2) && headerText.includes("PAGE")) {
       // MS-DOC-SPEC/13: the header document contains header and footer
-      // stories. Some WPS grid exports omit PlcfHdd but keep a compact
-      // PAGE-field footer story in ccpHdd; preserve the default footer link.
+      // stories. Some WPS grid exports omit PlcfHdd but keep compact
+      // PAGE-field footer stories in ccpHdd. DopBase.fFacingPages specifies
+      // whether even and odd page headers/footers are distinct.
+      if (wpsDocument.dop?.fFacingPages) {
+        return {
+          footerCount: 2,
+          footerRelationshipStartId: 3,
+          includeNotes: false,
+          bySection: new Map([[0, { defaultFooterId: "rId3", evenFooterId: "rId4" }]]),
+        };
+      }
       return {
         footerCount: 1,
         footerRelationshipStartId: 3,
@@ -665,6 +674,21 @@ function createFooterReferencePlan(wpsDocument = {}, sections = []) {
 	        bySection: new Map([[0, { defaultFooterId: "rId3" }]]),
 	      };
 	    }
+    if (sections.length === 1 && (onlySection.docGridType === 1 || onlySection.docGridType === 2) && /[^\r]/.test(headerText)) {
+      // MS-DOC-SPEC/13: when different even/odd headers are not enabled, the
+      // odd header and odd footer stories are the default header/footer.
+      return {
+        footerCount: 1,
+        headerCount: 1,
+        footerRelationshipStartId: 4,
+        includeNotes: false,
+        headerFooterRelationships: [
+          { id: "rId3", type: "header", index: 1 },
+          { id: "rId4", type: "footer", index: 1 },
+        ],
+        bySection: new Map([[0, { defaultHeaderId: "rId3", defaultFooterId: "rId4" }]]),
+      };
+    }
     if (sections.length > 1 && ccpHdd > 0 && /^[\r]*$/.test(headerText)) {
       return createCompactGridHeaderFooterPlan(sections);
     }
@@ -1198,7 +1222,9 @@ function tableToXml(table, rawText, paragraphProperties, paragraphRanges, charac
   const rowsXml = table.rows
     .map((row) => tableRowToXml(row, rawText, paragraphProperties, paragraphRanges, characterProperties, fontTable, table, TABLE_DOCX_PROPS, {
       ...documentOptions,
-      suppressTableCellParagraphControls: documentOptions.suppressTableCellParagraphControls || table.tableAutofit === true || documentOptions.suppressNegativeGridTableCellParagraphControls === true,
+      // MS-DOC-SPEC/16 sprmTFAutofit controls table column resizing only;
+      // it does not override parsed paragraph SPRMs inside the cells.
+      suppressTableCellParagraphControls: documentOptions.suppressTableCellParagraphControls || documentOptions.suppressNegativeGridTableCellParagraphControls === true,
     }))
     .join("");
 
@@ -1229,20 +1255,18 @@ function buildTablePropertiesXml(table, tablePosition, tableStyleId = TABLE_STYL
     ? rowJustifications[0]
     : null;
   const explicitJc = table.tableJustification ?? rowConsensusJc;
-  // MS-DOC-SPEC/19 TDefTableOperand says rgdxaCenter outer edges include
-  // cell spacing. Remove the parsed leading cell margin before writing tblInd;
-  // a negative edge that is only that margin is WPS' centered-table marker.
+  // MS-DOC-SPEC/19 TDefTableOperand says rgdxaCenter stores cell edges,
+  // while MS-DOC-SPEC/16 sprmTJc/sprmTJc90 are the explicit table
+  // justification properties. Normalize the leading cell-margin edge when
+  // writing tblInd, but do not infer justification from table geometry.
   const normalizedTableIndent = table.tableIndent?.type === "dxa" && table.tableIndent.width < 0
     ? { ...table.tableIndent, width: table.tableIndent.width + (cellMargins.left ?? 0) }
     : table.tableIndent;
   const positionedCenter = tablePosition?.nTDxaAbs === -4;
-  const centeredByMarginEdge = table.tableIndent?.type === "dxa"
-    && table.tableIndent.width < 0
-    && Math.abs(table.tableIndent.width) <= (cellMargins.left ?? 0);
   const indXml = tablePosition
     ? positionedCenter ? "" : `<w:tblInd w:w="0" w:type="dxa"/>`
     : table.tableIndent
-      ? (explicitJc || centeredByMarginEdge)
+      ? explicitJc
         ? "" // alignment via jc
         : `<w:tblInd w:w="${normalizedTableIndent.width}" w:type="${normalizedTableIndent.type}"/>`
       : "";
@@ -1251,9 +1275,7 @@ function buildTablePropertiesXml(table, tablePosition, tableStyleId = TABLE_STYL
     : explicitJc
       ? `<w:jc w:val="${explicitJc}"/>`
       : table.tableIndent
-        ? centeredByMarginEdge
-          ? `<w:jc w:val="center"/>`
-          : ""
+        ? ""
         : TABLE_DOCX_PROPS.jc ? `<w:jc w:val="${TABLE_DOCX_PROPS.jc}"/>` : "";
 
   return `      <w:tblPr>
@@ -1396,7 +1418,9 @@ function tableCellToXml(cell, rawText, paragraphProperties, paragraphRanges, cha
   const vAlign = cell.vAlign || "center";
   const tcBordersXml = buildCellBordersXml(table, cell, cellIndex, documentOptions);
   const shadingXml = cell.shading ? `\n          <w:shd w:val="${cell.shading.val}" w:color="${cell.shading.color}" w:fill="${cell.shading.fill}"/>` : "";
-  const tcPrXml = `        <w:tcPr>\n          <w:tcW w:w="${cell.width}" w:type="dxa"/>${gridSpanXml}${vMergeXml}${tcBordersXml}${shadingXml}\n          <w:noWrap w:val="0"/>\n          <w:vAlign w:val="${vAlign}"/>\n        </w:tcPr>\n`;
+  const tcWidthXml = buildTableCellWidthXml(table, row, cell, cellIndex);
+  const noWrapXml = cell.noWrap === true ? `<w:noWrap/>` : `<w:noWrap w:val="0"/>`;
+  const tcPrXml = `        <w:tcPr>\n          ${tcWidthXml}${gridSpanXml}${vMergeXml}${tcBordersXml}${shadingXml}\n          ${noWrapXml}\n          <w:vAlign w:val="${vAlign}"/>\n        </w:tcPr>\n`;
   const bookmarkStartXml = "";
   const bookmarkEndXml = "";
   // MS-DOC-SPEC/16 stores table-header text formatting in CHPX/paragraph-mark
@@ -1419,6 +1443,26 @@ function tableCellToXml(cell, rawText, paragraphProperties, paragraphRanges, cha
   return `      <w:tc>\n${tcPrXml}${bookmarkStartXml}${parasXml}${bookmarkEndXml}      </w:tc>\n`;
 }
 
+function buildTableCellWidthXml(table, row, cell, cellIndex) {
+  if (table?.tableWidthType === "pct" && table?.tableWidth != null && table?.gridCols?.length) {
+    const gridStart = row?.cells
+      ?.slice(0, cellIndex)
+      .reduce((sum, previousCell) => sum + (previousCell.gridSpan || 1), 0) ?? cellIndex;
+    const gridSpan = cell.gridSpan || 1;
+    const totalGridWidth = table.gridCols.reduce((sum, width) => sum + width, 0);
+    const cellGridWidth = table.gridCols.slice(gridStart, gridStart + gridSpan).reduce((sum, width) => sum + width, 0);
+    if (totalGridWidth <= 0 || cellGridWidth <= 0) {
+      throw new Error("Invalid parsed table grid width for percentage cell width emission");
+    }
+    // MS-DOC-SPEC/16 sprmTTableWidth can store a percentage preferred table
+    // width. OOXML pct widths are fiftieths of a percent, so cell widths are
+    // emitted as the parsed cell grid proportion of the parsed table width.
+    const pctWidth = Math.round((cellGridWidth / totalGridWidth) * table.tableWidth);
+    return `<w:tcW w:w="${pctWidth}" w:type="pct"/>`;
+  }
+  return `<w:tcW w:w="${cell.width}" w:type="dxa"/>`;
+}
+
 
 function buildCellBordersXml(table, cell, cellIndex, documentOptions = {}) {
   const parts = [];
@@ -1437,10 +1481,10 @@ function buildCellBordersXml(table, cell, cellIndex, documentOptions = {}) {
     parts.push(buildCellBorderSideXml("right", cell.borders.right, table, documentOptions));
   }
   if (table?.tableAutofit && table?.tableBorders?.insideV?.style !== "none") {
-    if (cellIndex > 0 && (!cell?.borders?.left?.style || cell.borders.left.style === "none")) {
+    if (cellIndex > 0 && !cell?.borders?.left?.nil && (!cell?.borders?.left?.style || cell.borders.left.style === "none")) {
       parts.push(`<w:left w:val="nil"/>`);
     }
-    if (cellIndex < table.gridCols.length - 1 && (!cell?.borders?.right?.style || cell.borders.right.style === "none")) {
+    if (cellIndex < table.gridCols.length - 1 && !cell?.borders?.right?.nil && (!cell?.borders?.right?.style || cell.borders.right.style === "none")) {
       parts.push(`<w:right w:val="nil"/>`);
     }
   }
@@ -1454,6 +1498,9 @@ function buildCellBorderSideXml(side, border, table = null, documentOptions = {}
     throw new Error(`Missing parsed cell border side ${side}`);
   }
   if (border.style === "none") {
+    if (border.nil) {
+      return `<w:${side} w:val="nil"/>`;
+    }
     if (table?.tableBordersExplicit && table?.tableBorders?.[side]?.style === "single") {
       // MS-DOC-SPEC/16 sprmTTableBorders supplies the row/table border. A
       // zero Brc in the TDefTable cell descriptor is not a NilBrc override.
@@ -1561,6 +1608,9 @@ function buildTableCellParagraphPropertiesXml(properties, paragraphMarkPropertie
   });
   appendParagraphTabsXml(parts, properties, paragraphText, numbering.hasListTabs);
   appendParagraphBordersXml(parts, properties);
+  if (properties?.paragraphShading) {
+    parts.push(`<w:shd w:val="${properties.paragraphShading.val}" w:color="${properties.paragraphShading.color}" w:fill="${properties.paragraphShading.fill}"/>`);
+  }
   if (!documentOptions.suppressEastAsianParagraphControls && !documentOptions.suppressTableCellParagraphControls) {
     appendParagraphControlXml(parts, properties, {
       // MS-DOC-SPEC/16 defines defaults for sprmPFKinsoku, sprmPFWordWrap,
@@ -2096,23 +2146,18 @@ function buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults, emi
 	  }
   if (props.boldCs === true) parts.push(`<w:bCs/>`);
   else if (props.boldCs === false) parts.push(`<w:bCs w:val="0"/>`);
-	  if (props.italic === true) {
-	    parts.push(`<w:i/>`);
-	  } else if (props.italic === false) {
-	    parts.push(`<w:i w:val="0"/>`);
-	    if (props.italicCs == null && !suppressComplexScriptToggles && (hasComplexScriptFont || emitComplexScriptSize)) {
-	      parts.push(`<w:iCs w:val="0"/>`);
-	    }
-	  }
+  if (props.italic === true) {
+    parts.push(`<w:i/>`);
+  } else if (props.italic === false) {
+    parts.push(`<w:i w:val="0"/>`);
+  }
   if (props.italicCs === true) parts.push(`<w:iCs/>`);
   else if (props.italicCs === false) parts.push(`<w:iCs w:val="0"/>`);
-  if (emitExtendedCharacterToggles) {
-    appendToggleRunProperty(parts, "caps", props.caps);
-    appendToggleRunProperty(parts, "smallCaps", props.smallCaps);
-    appendToggleRunProperty(parts, "strike", props.strike);
-    appendToggleRunProperty(parts, "dstrike", props.dstrike);
-    appendToggleRunProperty(parts, "vanish", props.vanish);
-  }
+  appendToggleRunProperty(parts, "caps", props.caps);
+  appendToggleRunProperty(parts, "smallCaps", props.smallCaps);
+  appendToggleRunProperty(parts, "strike", props.strike);
+  appendToggleRunProperty(parts, "dstrike", props.dstrike);
+  appendToggleRunProperty(parts, "vanish", props.vanish);
   if (props.textColor != null) {
     // MS-DOC color index 0 is automatic. WPS exports automatic text over an
     // explicit shaded run as black, while plain table/header text stays auto.
@@ -2302,6 +2347,9 @@ function buildParagraphPropertiesXml(properties, paragraphMarkProperties = null,
   }
   appendParagraphTabsXml(parts, properties, paragraphText, numbering.hasListTabs);
   appendParagraphBordersXml(parts, properties);
+  if (properties?.paragraphShading) {
+    parts.push(`<w:shd w:val="${properties.paragraphShading.val}" w:color="${properties.paragraphShading.color}" w:fill="${properties.paragraphShading.fill}"/>`);
+  }
   if (!documentOptions.suppressEastAsianParagraphControls) {
     appendParagraphControlXml(parts, properties, {
       includeDefaults: false,
@@ -2310,9 +2358,6 @@ function buildParagraphPropertiesXml(properties, paragraphMarkProperties = null,
   }
   appendParagraphSpacingXml(parts, properties, spacingSectionProperties);
   appendParagraphIndentXml(parts, properties, paragraphText, paragraphMarkProperties, documentOptions);
-  if (properties?.paragraphShading) {
-    parts.push(`<w:shd w:val="${properties.paragraphShading.val}" w:color="${properties.paragraphShading.color}" w:fill="${properties.paragraphShading.fill}"/>`);
-  }
   if (properties?.contextualSpacing) {
     parts.push(`<w:contextualSpacing/>`);
   }

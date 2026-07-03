@@ -2339,6 +2339,7 @@ function applyCellFlags(row) {
     if (!cell || !flags) continue;
     if (flags.bVertRestart) cell.vMerge = "restart";
     else if (flags.bVertMerge) cell.vMerge = "continue";
+    cell.noWrap = flags.fNoWrap === true;
     if (flags.nVertAlign === 2) cell.vAlign = "bottom";
     else if (flags.nVertAlign === 1) cell.vAlign = "center";
     else if (flags.nVertAlign === 0) cell.vAlign = "top";
@@ -2684,6 +2685,8 @@ function parseTableRowSprms(data, dataStream = null) {
                 bVertMerge: (bits & 0x0020) !== 0,
                 bVertRestart: (bits & 0x0040) !== 0,
                 nVertAlign: (bits & 0x0180) >> 7,
+                // MS-DOC-SPEC/19 TCGRF.fNoWrap is bit 13 of the TC80 flag word.
+                fNoWrap: (bits & 0x2000) !== 0,
               });
               cellBorders.push(parseCellBordersFromDescriptor(tblData.subarray(base + 4, base + 20)));
             }
@@ -3078,8 +3081,8 @@ function parseWw8CellBorderEntry(raw) {
   if (raw.length !== 4) {
     throw new Error(`Invalid WW8 cell border entry length ${raw.length}`);
   }
-  if (raw[0] === 0xff && raw[1] === 0xff) {
-    return createEmptyTableBorder();
+  if (raw.every((byte) => byte === 0xff)) {
+    return createNilTableBorder();
   }
   return normalizeTableBorderRecord({
     sprm: 0xd608,
@@ -3096,6 +3099,15 @@ function createEmptyTableBorder() {
     width: 0,
     color: null,
     space: 0,
+  };
+}
+
+function createNilTableBorder() {
+  return {
+    ...createEmptyTableBorder(),
+    // MS-DOC-SPEC/19 Brc80MayBeNil and BrcMayBeNil use all-bits-set
+    // NilBrc values to specify an explicit no-border region.
+    nil: true,
   };
 }
 
@@ -3154,13 +3166,13 @@ function parseBorderRecord(raw, sprm) {
     throw new Error(`Invalid border record length 0 in SPRM 0x${sprm.toString(16)}`);
   }
   if (raw.length === 4 && raw[0] === 0xff && raw[1] === 0xff) {
-    return createEmptyTableBorder();
+    return createNilTableBorder();
   }
   if (raw.length === 8 && raw.every((byte) => byte === 0xff)) {
-    return createEmptyTableBorder();
+    return createNilTableBorder();
   }
   if (raw.length === 2 && raw[0] === 0xff && raw[1] === 0xff) {
-    return createEmptyTableBorder();
+    return createNilTableBorder();
   }
   if (raw.length !== 2 && raw.length !== 4 && raw.length !== 8) {
     throw new Error(`Unimplemented border record length ${raw.length} in SPRM 0x${sprm.toString(16)}`);
@@ -3190,6 +3202,9 @@ function parseTableBorderEntry(raw, entrySize, sprm) {
   }
 
   if (entrySize === 4) {
+    if (raw.every((byte) => byte === 0xff)) {
+      return createNilTableBorder();
+    }
     return normalizeTableBorderRecord({
       sprm,
       brcType: raw[1],
@@ -3200,6 +3215,9 @@ function parseTableBorderEntry(raw, entrySize, sprm) {
   }
 
   if (entrySize === 8) {
+    if (raw.subarray(4, 8).every((byte) => byte === 0xff)) {
+      return createNilTableBorder();
+    }
     return normalizeTableBorderRecord({
       sprm,
       brcType: raw[5],

@@ -1,4 +1,4 @@
-import { parseSprms } from "./sprm.js";
+import { parseSprms, scanSprmRecords } from "./sprm.js";
 import { BRC_TYPE_NAMES, brcColorFromIco, colorRefToHex } from "./sprm.js";
 // sti→name mapping per MS-OI29500 §2.1.237 (Part 1 Section 17.7.4.9)
 export const STI_NAMES = ["Normal","heading 1","heading 2","heading 3","heading 4","heading 5","heading 6","heading 7","heading 8","heading 9","index 1","index 2","index 3","index 4","index 5","index 6","index 7","index 8","index 9","toc 1","toc 2","toc 3","toc 4","toc 5","toc 6","toc 7","toc 8","toc 9","Normal Indent","footnote text","annotation text","header","footer","index heading","caption","table of figures","envelope address","envelope return","footnote reference","annotation reference","line number","page number","endnote reference","endnote text","table of authorities","macro","toa heading","List","List Bullet","List Number","List 2","List 3","List 4","List 5","List Bullet 2","List Bullet 3","List Bullet 4","List Bullet 5","List Number 2","List Number 3","List Number 4","List Number 5","Title","Closing","Signature","Default Paragraph Font","Body Text","Body Text Indent","List Continue","List Continue 2","List Continue 3","List Continue 4","List Continue 5","Message Header","Subtitle","Salutation","Date","Body Text First Indent","Body Text First Indent 2","Note Heading","Body Text 2","Body Text 3","Body Text Indent 2","Body Text Indent 3","Block Text","Hyperlink","FollowedHyperlink","Strong","Emphasis","Document Map","Plain Text","E-mail Signature","HTML Top of Form","HTML Bottom of Form","Normal (Web)","HTML Acronym","HTML Address","HTML Cite","HTML Code","HTML Definition","HTML Keyboard","HTML Preformatted","HTML Sample","HTML Typewriter","HTML Variable","Normal Table","annotation subject","No List","Outline List 1","Outline List 2","Outline List 3","Table Simple 1","Table Simple 2","Table Simple 3","Table Classic 1","Table Classic 2","Table Classic 3","Table Classic 4","Table Colorful 1","Table Colorful 2","Table Colorful 3","Table Columns 1","Table Columns 2","Table Columns 3","Table Columns 4","Table Columns 5","Table Grid 1","Table Grid 2","Table Grid 3","Table Grid 4","Table Grid 5","Table Grid 6","Table Grid 7","Table Grid 8","Table List 1","Table List 2","Table List 3","Table List 4","Table List 5","Table List 6","Table List 7","Table List 8","Table 3D effects 1","Table 3D effects 2","Table 3D effects 3","Table Contemporary","Table Elegant","Table Professional","Table Subtle 1","Table Subtle 2","Table Web 1","Table Web 2","Table Web 3","Balloon Text","Table Grid","Table Theme","Placeholder Text","No Spacing","Light Shading","Light List","Light Grid","Medium Shading 1","Medium Shading 2","Medium List 1","Medium List 2","Medium Grid 1","Medium Grid 2","Medium Grid 3","Dark List","Colorful Shading","Colorful List","Colorful Grid","Light Shading Accent 1","Light List Accent 1","Light Grid Accent 1","Medium Shading 1 Accent 1","Medium Shading 2 Accent 1","Medium List 1 Accent 1","Revision","List Paragraph","Quote","Intense Quote","Medium List 2 Accent 1","Medium Grid 1 Accent 1","Medium Grid 2 Accent 1","Medium Grid 3 Accent 1","Dark List Accent 1","Colorful Shading Accent 1","Colorful List Accent 1","Colorful Grid Accent 1","Light Shading Accent 2","Light List Accent 2","Light Grid Accent 2","Medium Shading 1 Accent 2","Medium Shading 2 Accent 2","Medium List 1 Accent 2","Medium List 2 Accent 2","Medium Grid 1 Accent 2","Medium Grid 2 Accent 2","Medium Grid 3 Accent 2","Dark List Accent 2","Colorful Shading Accent 2","Colorful List Accent 2","Colorful Grid Accent 2","Light Shading Accent 3","Light List Accent 3","Light Grid Accent 3","Medium Shading 1 Accent 3","Medium Shading 2 Accent 3","Medium List 1 Accent 3","Medium List 2 Accent 3","Medium Grid 1 Accent 3","Medium Grid 2 Accent 3","Medium Grid 3 Accent 3","Dark List Accent 3","Colorful Shading Accent 3","Colorful List Accent 3","Colorful Grid Accent 3","Light Shading Accent 4","Light List Accent 4","Light Grid Accent 4","Medium Shading 1 Accent 4","Medium Shading 2 Accent 4","Medium List 1 Accent 4","Medium List 2 Accent 4","Medium Grid 1 Accent 4","Medium Grid 2 Accent 4","Medium Grid 3 Accent 4","Dark List Accent 4","Colorful Shading Accent 4","Colorful List Accent 4","Colorful Grid Accent 4","Light Shading Accent 5","Light List Accent 5","Light Grid Accent 5","Medium Shading 1 Accent 5","Medium Shading 2 Accent 5","Medium List 1 Accent 5","Medium List 2 Accent 5","Medium Grid 1 Accent 5","Medium Grid 2 Accent 5","Medium Grid 3 Accent 5","Dark List Accent 5","Colorful Shading Accent 5","Colorful List Accent 5","Colorful Grid Accent 5","Light Shading Accent 6","Light List Accent 6","Light Grid Accent 6","Medium Shading 1 Accent 6","Medium Shading 2 Accent 6","Medium List 1 Accent 6","Medium List 2 Accent 6","Medium Grid 1 Accent 6","Medium Grid 2 Accent 6","Medium Grid 3 Accent 6","Dark List Accent 6","Colorful Shading Accent 6","Colorful List Accent 6","Colorful Grid Accent 6"];
@@ -36,6 +36,8 @@ const FIB_FC_PLCFBKF_INDEX = 22;
 const FIB_FC_PLCFBKL_INDEX = 23;
 const FIB_FC_WSS_INDEX = 30;
 const FIB_FC_DOP_INDEX = 31; // 0x1F per FibRgFcLcb97
+const FIB_FC_PLCFSPAMOM_INDEX = 40;
+const FIB_FC_PLCFSPAHDR_INDEX = 41;
 const FIB_FC_STTBFRMARK_INDEX = 51; // MS-DOC-SPEC/15 FibRgFcLcb97 fcSttbfRMark at offset 0x232
 const SELSF_SIZE = 36;
 
@@ -139,6 +141,8 @@ function readFib(wordDocument) {
   const plcfBklOffset = FIB_FC_LCB_START + FIB_FC_PLCFBKL_INDEX * 8;
   const wssOffset = FIB_FC_LCB_START + FIB_FC_WSS_INDEX * 8;
   const dopOffset = FIB_FC_LCB_START + FIB_FC_DOP_INDEX * 8;
+  const plcfSpaMomOffset = FIB_FC_LCB_START + FIB_FC_PLCFSPAMOM_INDEX * 8;
+  const plcfSpaHdrOffset = FIB_FC_LCB_START + FIB_FC_PLCFSPAHDR_INDEX * 8;
   const sttbfRMarkOffset = FIB_FC_LCB_START + FIB_FC_STTBFRMARK_INDEX * 8;
   if (tableStreamOffset + 8 > FIB_FC_LCB_START + fcLcbCount * 4) {
     throw new Error("Unimplemented Word binary document variant: FIB does not contain fcClx/lcbClx");
@@ -198,6 +202,10 @@ function readFib(wordDocument) {
     lcbWss: wssOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(wssOffset + 4) : 0,
     fcDop: dopOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(dopOffset) : 0,
     lcbDop: dopOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(dopOffset + 4) : 0,
+    fcPlcSpaMom: plcfSpaMomOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(plcfSpaMomOffset) : 0,
+    lcbPlcSpaMom: plcfSpaMomOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(plcfSpaMomOffset + 4) : 0,
+    fcPlcSpaHdr: plcfSpaHdrOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(plcfSpaHdrOffset) : 0,
+    lcbPlcSpaHdr: plcfSpaHdrOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(plcfSpaHdrOffset + 4) : 0,
     fcSttbfRMark: sttbfRMarkOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(sttbfRMarkOffset) : 0,
     lcbSttbfRMark: sttbfRMarkOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(sttbfRMarkOffset + 4) : 0,
     characterCounts: {
@@ -888,6 +896,15 @@ function resolveCharacterStyleId(istd, styles) {
 
 function parseParagraphGrpprl(data) {
   const parsed = parseSprms(data, true);
+  const properties = buildParagraphPropertiesFromSprms(parsed);
+  const paragraphPropertyChange = parseParagraphPropertyChange(data, parsed);
+  if (paragraphPropertyChange) {
+    properties.paragraphPropertyChange = paragraphPropertyChange;
+  }
+  return properties;
+}
+
+function buildParagraphPropertiesFromSprms(parsed) {
   return {
     istd: parsed.istd ?? null,
     styleId: null,
@@ -931,6 +948,29 @@ function parseParagraphGrpprl(data) {
     paragraphShading: parsed.paragraphShading ?? null,
     tablePosition: parsed.tablePosition ?? null,
     tableNoAllowOverlap: parsed.tableNoAllowOverlap ?? null,
+  };
+}
+
+function parseParagraphPropertyChange(data, parsed) {
+  const wallRecords = scanSprmRecords(data, true)
+    .filter((record) => record.sprm === 0x2664);
+  const activeWall = wallRecords.at(-1);
+  if (!activeWall) return null;
+  if (activeWall.val[0] === 0) return null;
+  if (activeWall.val[0] !== 1) {
+    throw new Error(`Out-of-spec MS-DOC sprmPWall Bool8 value ${activeWall.val[0]}`);
+  }
+
+  const beforeWall = parseSprms(data.subarray(0, activeWall.offset), true);
+  const mark = beforeWall.paragraphPropRMark ?? parsed.paragraphPropRMark;
+  if (!mark?.fPropRMark) return null;
+
+  return {
+    // MS-DOC-SPEC/16 sprmPWall: SPRMs before sprmPWall specify the state
+    // before paragraph-property revision marking was enabled.
+    previous: buildParagraphPropertiesFromSprms(beforeWall),
+    // MS-DOC-SPEC/16 sprmPPropRMark: PropRMark stores author and DTTM.
+    mark,
   };
 }
 
@@ -1655,6 +1695,9 @@ function applySectionSprm(props, sprm, val) {
       props.sectionBidi = val[0] !== 0;
       break;
     case 0x322a:
+      // MS-DOC-SPEC/16 sprmSFRTLGutter is a Bool8. Preserve presence so an
+      // explicit false value can be emitted instead of disappearing as default.
+      props.rtlGutterSpecified = true;
       props.rtlGutter = val[0] !== 0;
       break;
     case 0x3011:

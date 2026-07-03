@@ -56,6 +56,7 @@ const FULL_WPS = "sample/full/original.wps";
 const FULL_DOCX = "sample/full/expected.docx";
 const TABLE2_WPS = "sample/table2/original.wps";
 const TABLE6_DOCX = "sample/table6/expected.docx";
+const SAMPLE8_WPS = "sample/sample8/original.wps";
 const SAMPLE9_WPS = "sample/sample9/original.wps";
 const SAMPLE10_WPS = "sample/sample10/original.wps";
 
@@ -222,6 +223,29 @@ test("sample2 settings emit the East Asian grid profile", async () => {
   assert.equal(extractSettingsNode(convertedXml, "w:endnotePr"), extractSettingsNode(expectedXml, "w:endnotePr"));
 });
 
+test("settings shape defaults are emitted from parsed MS-DOC PlcfSpa FIB slots", async () => {
+  const sample8 = readWps(await readFile(SAMPLE8_WPS));
+  const sample9 = readWps(await readFile(SAMPLE9_WPS));
+  const sample10 = readWps(await readFile(SAMPLE10_WPS));
+
+  assert.ok(sample8.fib.lcbPlcSpaMom > 0);
+  assert.equal(sample8.fib.lcbPlcSpaHdr, 0);
+  assert.equal(sample9.fib.lcbPlcSpaMom, 0);
+  assert.ok(sample9.fib.lcbPlcSpaHdr > 0);
+  assert.equal(sample10.fib.lcbPlcSpaMom, 0);
+  assert.equal(sample10.fib.lcbPlcSpaHdr, 0);
+
+  const sample8Settings = readZipEntry(wpsToDocxBuffer(sample8, { title: "sample8" }), "word/settings.xml").toString("utf8");
+  const sample8Expected = readZipEntry(await readFile("sample/sample8/expected.docx"), "word/settings.xml").toString("utf8");
+  assert.equal(extractSettingsNode(sample8Settings, "w:shapeDefaults"), extractSettingsNode(sample8Expected, "w:shapeDefaults"));
+  assert.equal(extractSettingsNode(sample8Settings, "w:hdrShapeDefaults"), null);
+
+  const sample9Settings = readZipEntry(wpsToDocxBuffer(sample9, { title: "sample9" }), "word/settings.xml").toString("utf8");
+  const sample9Expected = readZipEntry(await readFile("sample/sample9/expected.docx"), "word/settings.xml").toString("utf8");
+  assert.equal(extractSettingsNode(sample9Settings, "w:hdrShapeDefaults"), extractSettingsNode(sample9Expected, "w:hdrShapeDefaults"));
+  assert.equal(extractSettingsNode(sample9Settings, "w:shapeDefaults"), null);
+});
+
 test("sample3 settings use the 420 default tab stop from parsed document settings", async () => {
   const wps = readWps(await readFile("sample/sample3/original.wps"));
   assert.equal(wps.dop.dxaTab, 420);
@@ -386,15 +410,15 @@ test("parses the MS-DOC Selsf last-selection structure", async () => {
   assert.equal(basic.lastSelection.cpFirst, 253);
 });
 
-test("Selsf selection outside the main story does not force a document.xml _GoBack bookmark", async () => {
+test("Selsf selection within the MS-DOC section extent emits a _GoBack bookmark", async () => {
   const sample9 = readWps(await readFile(SAMPLE9_WPS));
   assert.equal(sample9.lastSelection.fIns, true);
   assert.equal(sample9.lastSelection.cpFirst, 1400);
   assert.ok(sample9.lastSelection.cpFirst > sample9.bodyText.length);
-  assert.ok(sample9.lastSelection.cpFirst <= sample9.rawText.length);
+  assert.ok(sample9.lastSelection.cpFirst <= sample9.sections.at(-1).cpEnd);
 
   const xml = readDocxDocumentXml(wpsToDocxBuffer(sample9, { title: "sample9" }));
-  assert.doesNotMatch(xml, /w:name="_GoBack"/);
+  assert.match(xml, /w:name="_GoBack"/);
 });
 
 test("compact header subdocuments emit MS-DOC default/even header-footer references", async () => {
@@ -1013,6 +1037,28 @@ test("sample3 body paragraph keeps one merged run with explicit black shading", 
   assert.doesNotMatch(paragraph, /<w:highlight w:val="none"\/>/);
 });
 
+test("preserves parsed MS-DOC automatic text color when shading is present", () => {
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}],
+    characterProperties: [{
+      textColor: "auto",
+      background: { val: "clear", color: "auto", fill: "FFFFFF" },
+    }],
+    sections: [{ cpStart: 0, cpEnd: 2, properties: {} }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "auto-color-shading" });
+  const xml = readDocxDocumentXml(docx);
+
+  assert.match(xml, /<w:color w:val="auto"\/>/);
+  assert.match(xml, /<w:shd w:val="clear" w:color="auto" w:fill="FFFFFF"\/>/);
+});
+
 test("sample3 paragraph line numbering comes from parsed PFNoLineNumb", async () => {
   const wps = readWps(await readFile("sample/sample3/original.wps"));
   assert.ok(
@@ -1131,6 +1177,7 @@ test("parses MS-DOC section orientation and 32-bit page-number start SPRMs", () 
   assert.equal(props.verticalAlign, "bottom");
   assert.equal(props.sectionBidi, true);
   assert.equal(props.rtlGutter, true);
+  assert.equal(props.rtlGutterSpecified, true);
   assert.equal(props.lineNumberRestart, "continuous");
   assert.equal(props.lineNumberCountBy, 3);
   assert.equal(props.lineNumberDistance, 240);
@@ -1174,6 +1221,10 @@ test("parses MS-DOC section orientation and 32-bit page-number start SPRMs", () 
     () => parseSectionSprms(Buffer.from([0x3f, 0x50, 0x00, 0x40])),
     /Out-of-spec footnote number start 16384/,
   );
+
+  const explicitFalseRtlGutter = parseSectionSprms(Buffer.from([0x2a, 0x32, 0x00]));
+  assert.equal(explicitFalseRtlGutter.rtlGutter, false);
+  assert.equal(explicitFalseRtlGutter.rtlGutterSpecified, true);
 });
 
 test("emits parsed section gutter margin, column separator, and vertical alignment in DOCX section properties", () => {
@@ -1239,6 +1290,26 @@ test("emits parsed section gutter margin, column separator, and vertical alignme
   assert.match(xml, /<w:vAlign w:val="center"\/>/);
   assert.match(xml, /<w:noEndnote\/><w:bidi\/>/);
   assert.match(xml, /<w:bidi\/><w:rtlGutter\/>/);
+
+  const explicitFalseDocx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}],
+    sections: [{
+      cpStart: 0,
+      cpEnd: 2,
+      properties: {
+        rtlGutter: false,
+        rtlGutterSpecified: true,
+      },
+    }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "section-rtl-gutter-false" });
+  assert.match(readDocxDocumentXml(explicitFalseDocx), /<w:rtlGutter w:val="0"\/>/);
 });
 
 test("ignores MS-DOC section page-number start when restart is disabled", () => {
@@ -1264,6 +1335,77 @@ test("ignores MS-DOC section page-number start when restart is disabled", () => 
 
   assert.match(xml, /<w:pgNumType w:fmt="decimal"\/>/);
   assert.doesNotMatch(xml, /<w:pgNumType[^>]*w:start="12"/);
+});
+
+test("emits parsed MS-DOC page-number format in line-grid sections", () => {
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}],
+    sections: [{
+      cpStart: 0,
+      cpEnd: 2,
+      properties: {
+        docGridType: 2,
+        docGridCharSpace: 0,
+        docGridLinePitch: 312,
+        pageNumberRestart: false,
+        pageNumberFormat: 0x39,
+      },
+    }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      typography: { fKerningPunct: false, iJustification: 1 },
+      xmlValidation: { fValidateXML: false, fShowXMLErrors: false },
+      grfFmtFilter: 20516,
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "line-grid-page-number-format" });
+  const xml = readDocxDocumentXml(docx);
+
+  assert.match(xml, /<w:pgNumType w:fmt="numberInDash"\/>/);
+});
+
+test("emits MS-DOC non-section 0x0C as a manual page break", () => {
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\x0cB\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}],
+    sections: [{
+      cpStart: 0,
+      cpEnd: 4,
+      properties: {},
+    }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "manual-page-break" });
+  const xml = readDocxDocumentXml(docx);
+
+  assert.match(xml, /<w:t>A<\/w:t><\/w:r><w:r>[\s\S]*?<w:br w:type="page"\/><\/w:r><\/w:p>\s*<w:p[\s\S]*?<w:t>B<\/w:t>/);
+});
+
+test("does not emit MS-DOC section-ending 0x0C as a manual page break", () => {
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\x0cB\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}, {}],
+    sections: [
+      { cpStart: 0, cpEnd: 2, properties: {} },
+      { cpStart: 2, cpEnd: 4, properties: {} },
+    ],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "section-form-feed" });
+  const xml = readDocxDocumentXml(docx);
+
+  assert.doesNotMatch(xml, /<w:br w:type="page"\/>/);
 });
 
 test("MS-DOC border color and type enums use spec values without fallback", () => {
@@ -1374,6 +1516,94 @@ test("parses and emits MS-DOC character revision mark toggles", () => {
 
   assert.match(xml, /<w:ins w:id="\d+" w:author="Unknown"><w:r>[\s\S]*?<w:t>A<\/w:t><\/w:r><\/w:ins>/);
   assert.match(xml, /<w:del w:id="\d+" w:author="Unknown"><w:r>[\s\S]*?<w:delText>B<\/w:delText><\/w:r><\/w:del>/);
+});
+
+test("parses MS-DOC paragraph property revision mark operands", () => {
+  const revisionDate = 26 | (13 << 6) | (22 << 11) | (8 << 16) | ((2024 - 1900) << 20);
+  const props = parseSprms(Buffer.from([
+    0x6f, 0xc6, 0x07, // sprmPPropRMark, PropRMarkOperand.cb
+    0x01, // fPropRMark
+    0x02, 0x00, // ibstshort
+    revisionDate & 0xff,
+    (revisionDate >> 8) & 0xff,
+    (revisionDate >> 16) & 0xff,
+    (revisionDate >> 24) & 0xff,
+  ]));
+
+  assert.deepEqual(props.paragraphPropRMark, {
+    fPropRMark: true,
+    authorIndex: 2,
+    date: revisionDate,
+  });
+  assert.throws(
+    () => parseSprms(Buffer.from([0x6f, 0xc6, 0x08, 0x01, 0x02, 0x00, 0, 0, 0, 0, 0])),
+    /Out-of-spec MS-DOC paragraph property revision mark PropRMarkOperand cb 8/,
+  );
+});
+
+test("parses MS-DOC sprmPWall previous paragraph properties for revision marking", async () => {
+  const sample10 = readWps(await readFile(SAMPLE10_WPS));
+  const changed = sample10.paragraphProperties.find((properties) => properties?.paragraphPropertyChange);
+
+  assert.ok(changed, "expected a paragraph with preserved revision properties");
+  assert.equal(changed.paragraphPropertyChange.mark.fPropRMark, true);
+  assert.equal(changed.paragraphPropertyChange.mark.authorIndex, 1);
+  assert.deepEqual(changed.paragraphPropertyChange.previous.lineSpacing, { twips: 240, rule: "auto" });
+  assert.equal(changed.paragraphPropertyChange.previous.listLevel, 0);
+  assert.equal(changed.paragraphPropertyChange.previous.listId, 0);
+  assert.equal(changed.paragraphPropertyChange.previous.leftIndentChars, 200);
+});
+
+test("emits MS-DOC paragraph property revision as OOXML pPrChange", () => {
+  const revisionDate = 26 | (13 << 6) | (22 << 11) | (8 << 16) | ((2024 - 1900) << 20);
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    revisionAuthors: ["Unknown", "Alice"],
+    paragraphProperties: [{
+      paragraphPropertyChange: {
+        mark: { fPropRMark: true, authorIndex: 1, date: revisionDate },
+        previous: {
+          listLevel: 0,
+          listId: 0,
+          lineSpacing: { twips: 240, rule: "auto" },
+          leftIndentChars: 200,
+        },
+      },
+    }],
+    sections: [{ cpStart: 0, cpEnd: 2, properties: {} }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "paragraph-property-revision" });
+  const xml = readDocxDocumentXml(docx);
+
+  assert.match(xml, /<w:pPrChange w:id="\d+" w:author="Alice" w:date="2024-08-22T13:26:00Z"><w:pPr><w:numPr><w:ilvl w:val="0"\/><w:numId w:val="0"\/><\/w:numPr><w:spacing w:line="240" w:lineRule="auto"\/><w:ind w:leftChars="200"\/><\/w:pPr><\/w:pPrChange>/);
+});
+
+test("emits MS-DOC paragraph-mark insertion revision inside paragraph run properties", () => {
+  const revisionDate = 8 | (9 << 6) | (17 << 11) | (5 << 16) | ((2024 - 1900) << 20);
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    revisionAuthors: ["Unknown", "Alice"],
+    paragraphProperties: [{}],
+    characterProperties: [
+      {},
+      { revisionMarkIns: true, revisionAuthorIndex: 1, revisionDate },
+    ],
+    sections: [{ cpStart: 0, cpEnd: 2, properties: {} }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "paragraph-mark-revision" });
+  const xml = readDocxDocumentXml(docx);
+
+  assert.match(xml, /<w:pPr><w:rPr><w:ins w:id="\d+" w:author="Alice" w:date="2024-05-17T09:08:00Z"\/>/);
 });
 
 test("emits explicit MS-DOC complex-script bold independently of derived toggles", () => {

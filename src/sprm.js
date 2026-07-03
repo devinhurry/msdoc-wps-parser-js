@@ -20,7 +20,7 @@ const SPRM_SIZES = {
   0x244B: 1, 0x244C: 1, 0x244D: 4, 0x244E: 4, 0x244F: 4,
   0x2450: 4, 0x2451: 4, 0x2452: 4, 0x2453: 4, 0x2454: 4,
   0x245A: 1, 0x245B: 1, 0x245C: 1, 0x246D: 1,
-  0x260A: 1, 0x460B: 2,
+  0x260A: 1, 0x460B: 2, 0x2664: 1,
   0x261B: 1, 0x2423: 1, 0x2430: 1,
   0x8418: 2, 0x8419: 2, 0x841A: 2, 0x442B: 2,
   0x2640: 1,
@@ -71,7 +71,7 @@ const SPRM_SIZES = {
   0x484B: 2, 0x4857: 2, 0x4858: 2, 0x4859: 2, 0x485A: 2, 0x485B: 2,
   0x8840: 2, 0x8841: 2, 0x8842: 2, 0x8843: 2, 0x8844: 2,
   0x8845: 2, 0x8846: 2, 0x8847: 2, 0x8848: 2, 0x8849: 2,
-  0xC60D: -1, 0xCA76: -1, 0xCA78: -1,
+  0xC60D: -1, 0xC66F: -1, 0xCA76: -1, 0xCA78: -1,
 };
 
 const SPRM_CATEGORIES = {
@@ -149,6 +149,8 @@ const SPRM_CATEGORIES = {
   0x245C: "spacingAfterAuto",
   0x260A: "listLevel",
   0x460B: "listId",
+  0x2664: "paragraphWall",
+  0xC66F: "paragraphPropRMark",
 };
 
 const ALIGNMENT_MAP = { 0: "left", 1: "right", 2: "center", 3: "both", 4: "distribute", 5: "numTab" };
@@ -273,10 +275,18 @@ function isLowByteOfKnownSprm(grpprl, off) {
 
 export function parseSprms(grpprl, skipIstd = false, cupx = 0) {
   const props = {};
-  let off = skipIstd ? 2 : 0;
   if (skipIstd && grpprl.length >= 2) {
     props.istd = grpprl.readUInt16LE(0);
   }
+  for (const { sprm, val, size } of scanSprmRecords(grpprl, skipIstd, cupx)) {
+    applySprm(props, sprm, val, size);
+  }
+  return props;
+}
+
+export function scanSprmRecords(grpprl, skipIstd = false, cupx = 0) {
+  const records = [];
+  let off = skipIstd ? 2 : 0;
   // Skip Upx section (user-defined properties) in style GRPPRLs.
   // cupx values per MS-DOC StdfBase: 1=char, 2=para, 3=table
   off += cupx;
@@ -290,6 +300,7 @@ export function parseSprms(grpprl, skipIstd = false, cupx = 0) {
       off += 1;
       continue;
     }
+    const recordOffset = off;
     const sprm = grpprl.readUInt16LE(off);
     off += 2;
     let size = SPRM_SIZES[sprm];
@@ -314,10 +325,10 @@ export function parseSprms(grpprl, skipIstd = false, cupx = 0) {
       }
     }
     const val = grpprl.subarray(off, off + size);
-    applySprm(props, sprm, val, size);
+    records.push({ sprm, offset: recordOffset, operandOffset: off, operandEnd: off + size, val, size });
     off += size;
   }
-  return props;
+  return records;
 }
 
 function applySprm(props, sprm, val, size) {
@@ -394,6 +405,14 @@ function applySprm(props, sprm, val, size) {
       break;
     case 0x2401:
       props.spacingAfter = val.readInt32LE(0);
+      break;
+    case 0x2664:
+      props.paragraphWall = val[0] !== 0;
+      break;
+    case 0xC66F:
+      // MS-DOC-SPEC/16 sprmPPropRMark stores a PropRMarkOperand for a
+      // paragraph property revision mark.
+      props.paragraphPropRMark = parsePropRMarkOperand(val, "paragraph property revision mark");
       break;
     case 0x4A43:
       props.fontSize = val.readUInt16LE(0);
@@ -606,13 +625,7 @@ function applySprm(props, sprm, val, size) {
     case 0xCA89:
       // MS-DOC-SPEC/16 sprmCPropRMark90 / sprmCPropRMark: character property
       // revision mark. Operand is PropRMarkOperand: cb(1) + PropRMark(7).
-      if (val.length >= 8) {
-        props.charPropRMark = {
-          fPropRMark: val[1] !== 0,
-          authorIndex: val.readUInt16LE(2),
-          date: val.readUInt32LE(4),
-        };
-      }
+      props.charPropRMark = parsePropRMarkOperand(val, "character property revision mark");
       break;
     case 0xC60D:
       props.tabs = parseTabsOperand(val);
@@ -873,6 +886,21 @@ function applySprm(props, sprm, val, size) {
     default:
       break;
   }
+}
+
+function parsePropRMarkOperand(val, context) {
+  if (val.length < 8) {
+    throw new Error(`Truncated MS-DOC ${context} PropRMarkOperand`);
+  }
+  const cb = val[0];
+  if (cb !== 7) {
+    throw new Error(`Out-of-spec MS-DOC ${context} PropRMarkOperand cb ${cb}`);
+  }
+  return {
+    fPropRMark: val[1] !== 0,
+    authorIndex: val.readInt16LE(2),
+    date: val.readUInt32LE(4),
+  };
 }
 
 // Brc80 structure (4 bytes): dptLineWidth(1), brcType(1), ico(1), dptSpace+flags(1)

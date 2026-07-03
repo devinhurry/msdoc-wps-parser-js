@@ -145,6 +145,8 @@ function buildSettingsXml(wpsDocument = {}) {
 	  const readOnlyEastAsianProfile = hasGridType1 && hasVbaProject;
   const compactGridHeaderSubdocument = hasCompactGridHeaderSubdocument(wpsDocument, sections);
 	  const dop = wpsDocument.dop;
+  const hasMainShapeAnchors = (wpsDocument.fib?.lcbPlcSpaMom ?? 0) > 0;
+  const hasHeaderShapeAnchors = (wpsDocument.fib?.lcbPlcSpaHdr ?? 0) > 0;
 
   const defaultTabStop = wpsDocument.defaultTabStop;
   if (!Number.isInteger(defaultTabStop) || defaultTabStop <= 0) {
@@ -276,6 +278,9 @@ function buildSettingsXml(wpsDocument = {}) {
     throw new Error(`Out-of-spec DopTypography iJustification ${typography.iJustification}`);
   }
   parts.push(`<w:characterSpacingControl w:val="${characterSpacingControl}"/>`);
+  if (hasHeaderShapeAnchors) {
+    parts.push(buildHeaderShapeDefaultsXml());
+  }
 
   const xmlValidation = dop?.xmlValidation;
   if (hasGridType2 && !xmlValidation) {
@@ -347,11 +352,28 @@ function buildSettingsXml(wpsDocument = {}) {
   if (hasEastAsianGrid) {
     parts.push(`<w:doNotIncludeSubdocsInStats/>`);
   }
+  if (hasMainShapeAnchors) {
+    parts.push(buildMainShapeDefaultsXml());
+  }
 
   parts.push(`<mc:AlternateContent><mc:Choice Requires="wpsCustomData"><wpsCustomData:typoFeatureVersion val="0"/></mc:Choice></mc:AlternateContent>`);
 
   parts.push(`</w:settings>`);
   return parts.join("");
+}
+
+function buildMainShapeDefaultsXml() {
+  // MS-DOC-SPEC/15 fcPlcSpaMom/lcbPlcSpaMom identify PlcfSpa shape anchors
+  // in the Main Document. OOXML shapeDefaults stores VML defaults for the
+  // body story; its idmap data is 1.
+  return `<w:shapeDefaults><o:shapedefaults/><o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="1"/></o:shapelayout></w:shapeDefaults>`;
+}
+
+function buildHeaderShapeDefaultsXml() {
+  // MS-DOC-SPEC/15 fcPlcSpaHdr/lcbPlcSpaHdr identify PlcfSpa shape anchors
+  // in the Header Document. OOXML hdrShapeDefaults stores VML defaults for
+  // header/footer stories; its idmap data is 2.
+  return `<w:hdrShapeDefaults><o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="2"/></o:shapelayout></w:hdrShapeDefaults>`;
 }
 
 const FOOTNOTES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -989,10 +1011,13 @@ function resolveGoBackBookmarkCp(wpsDocument = {}, sections = [], bodyText = "")
   if (selection.cpFirst !== selection.cpLim) {
     throw new Error("Cannot emit _GoBack bookmark from a non-collapsed Selsf selection");
   }
-  if (selection.cpFirst < 0 || selection.cpFirst > bodyText.length) {
-    // MS-DOC-SPEC/19 Selsf CPs are document text-piece positions. This
-    // converter emits _GoBack only in word/document.xml, so a saved selection
-    // in another story has no main-document bookmark position.
+  const mainTextLimit = sections.length
+    ? Math.max(...sections.map((section) => section?.cpEnd ?? 0))
+    : bodyText.length;
+  if (selection.cpFirst < 0 || selection.cpFirst > mainTextLimit) {
+    // MS-DOC-SPEC/19 Selsf CPs are document text-piece positions. PlcfSed
+    // section limits define the main-document CP extent; a selection beyond
+    // that range belongs to another story and has no document.xml bookmark.
     return null;
   }
 
@@ -1012,7 +1037,7 @@ function isTrailingBodyInsertionPoint(bodyText, cp) {
 
 function createDocumentXml(rawText, paragraphProperties = [], characterProperties = [], fontTable = [], sections = [], tables = [], documentOptions = {}) {
   documentOptions.bodyTextLength = rawText.length;
-  const paragraphs = splitWordParagraphs(rawText);
+  const paragraphs = splitWordParagraphs(rawText, sections);
   for (const paragraph of paragraphs) {
     paragraph.bodyTextLength = rawText.length;
   }
@@ -1057,6 +1082,9 @@ function createDocumentXml(rawText, paragraphProperties = [], characterPropertie
       continue;
     }
     if (isSuppressibleFinalEmptyParagraph(paragraph, paragraphProperties[pi], documentOptions)) {
+      continue;
+    }
+    if (paragraphs[pi - 1]?.manualPageBreak === true && paragraph.text.length === 0 && paragraph.delimiter === "\r") {
       continue;
     }
 
@@ -1648,9 +1676,11 @@ function buildTableCellParagraphPropertiesXml(properties, paragraphMarkPropertie
 	    suppressComplexScriptSize: documentOptions.suppressComplexScriptSize,
 	    suppressComplexScriptToggles: documentOptions.lineGridWithoutHeaderSubdocument,
       emitExtendedCharacterToggles: documentOptions.emitExtendedCharacterToggles === true,
-	    forceComplexScriptBoldToggle: emitNegativeGridBaseline,
-	    emitBaselineVertAlign: emitNegativeGridBaseline,
-	  });
+		    forceComplexScriptBoldToggle: emitNegativeGridBaseline,
+		    emitBaselineVertAlign: emitNegativeGridBaseline,
+		    emitRevisionMarkProperties: true,
+		    revisionAuthors: documentOptions.revisionAuthors,
+		  });
   if (paragraphRunProperties) {
     parts.push(paragraphRunProperties);
   } else {
@@ -1660,16 +1690,23 @@ function buildTableCellParagraphPropertiesXml(properties, paragraphMarkPropertie
   return `          <w:pPr>${parts.join("")}</w:pPr>\n`;
 }
 
-function splitWordParagraphs(rawText) {
+function splitWordParagraphs(rawText, sections = []) {
   const paragraphs = [];
   let start = 0;
+  const sectionEndFormFeeds = new Set(
+    sections
+      .map((section) => section?.cpEnd - 1)
+      .filter((cp) => Number.isInteger(cp) && rawText[cp] === "\x0c"),
+  );
   for (let i = 0; i < rawText.length; i += 1) {
     if (rawText[i] === "\r" || rawText[i] === "\x07" || rawText[i] === "\x0c") {
+      const isManualPageBreak = rawText[i] === "\x0c" && !sectionEndFormFeeds.has(i);
       paragraphs.push({
         text: cleanParagraphText(rawText.slice(start, i)),
         delimiter: rawText[i],
         cpStart: start,
         cpEnd: i + 1,
+        manualPageBreak: isManualPageBreak,
       });
       start = i + 1;
     }
@@ -1697,7 +1734,9 @@ function cleanParagraphText(text) {
 
 function paragraphToXml(paragraph, properties, characterProperties, fontTable, charIdx, sectionProperties = null, spacingSectionProperties = sectionProperties, sectionIndex = -1, paraId = null, documentOptions = {}) {
   const charCount = paragraph.text.length;
-  const paragraphMarkProperties = characterProperties[paragraph.cpEnd - 1] ?? characterProperties[charIdx + charCount] ?? null;
+  const paragraphMarkProperties = paragraph.manualPageBreak
+    ? (characterProperties[paragraph.cpEnd] ?? characterProperties[paragraph.cpEnd - 1] ?? characterProperties[charIdx + charCount] ?? null)
+    : (characterProperties[paragraph.cpEnd - 1] ?? characterProperties[charIdx + charCount] ?? null);
   const bookmarkEvents = buildBookmarkEventsForParagraph(documentOptions.bookmarks ?? [], paragraph);
   const paragraphOptions = withParagraphSectionOptions(documentOptions, spacingSectionProperties);
   const pPr = buildParagraphPropertiesXml(
@@ -1710,18 +1749,28 @@ function paragraphToXml(paragraph, properties, characterProperties, fontTable, c
     paragraph.text,
     paragraphOptions,
   );
-	  const runs = buildRuns(paragraph.text, characterProperties, fontTable, charIdx, properties, null, {
+  const runs = buildRuns(paragraph.text, characterProperties, fontTable, charIdx, properties, null, {
 	    suppressComplexScriptSize: paragraphOptions.suppressComplexScriptSize,
     suppressComplexScriptToggles: paragraphOptions.suppressComplexScriptToggles,
     emitExtendedCharacterToggles: paragraphOptions.emitExtendedCharacterToggles,
-	  }, bookmarkEvents, paragraphOptions);
+		  }, bookmarkEvents, paragraphOptions);
+  const manualPageBreakRun = paragraph.manualPageBreak
+    ? buildManualPageBreakRun(characterProperties, fontTable, paragraph.cpEnd - 1, bookmarkEvents)
+    : "";
   const pid = paraId || nextParaId();
   const emptyParagraphBookmarks = paragraph.text.length === 0
     ? bookmarkTagsAtCp(bookmarkEvents, paragraph.cpStart)
     : "";
   return {
-    xml: `    <w:p w14:paraId="${pid}">${pPr}${emptyParagraphBookmarks}${runs}</w:p>\n`,
+    xml: `    <w:p w14:paraId="${pid}">${pPr}${emptyParagraphBookmarks}${runs}${manualPageBreakRun}</w:p>\n`,
   };
+}
+
+function buildManualPageBreakRun(characterProperties, fontTable, charIdx, bookmarkEvents) {
+  const before = bookmarkTagsAtCp(bookmarkEvents, charIdx);
+  const rPr = buildRunPropertiesXml(characterProperties, fontTable, charIdx);
+  const after = bookmarkTagsAtCp(bookmarkEvents, charIdx + 1);
+  return `${before}<w:r>${rPr}<w:br w:type="page"/></w:r>${after}`;
 }
 
 function withParagraphSectionOptions(documentOptions, sectionProperties = null) {
@@ -1807,8 +1856,18 @@ function buildRuns(paragraph, characterProperties, fontTable, charIdx, paragraph
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       continue;
     }
-    if (part === "\x07" || part === "\x0c") {
+    if (part === "\x07") {
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      currentCharIdx += 1;
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      continue;
+    }
+    // MS-DOC-SPEC/18 PlcfSed: an end-of-section character (0x0C) that is
+    // not the final character in a section specifies a manual page break.
+    if (part === "\x0c") {
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
+      runs.push(`<w:r>${rPr}<w:br w:type="page"/></w:r>`);
       currentCharIdx += 1;
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       continue;
@@ -1985,7 +2044,8 @@ function buildSymbolRun(props, fontTable, rPr, charCount) {
 }
 
 function buildRevisionMarkXml(props, markType, revisionAuthors = ["Unknown"]) {
-  // MS-DOC-SPEC/16: PropRMark author index and date from character properties.
+  // MS-DOC-SPEC/16: revision author index and DTTM come from revision-mark
+  // SPRMs and PropRMark structures.
   const authorIndex = markType === "del"
     ? (props.revisionDelAuthorIndex ?? props.revisionAuthorIndex ?? 0)
     : (props.revisionAuthorIndex ?? 0);
@@ -2099,7 +2159,7 @@ function buildRunPropertiesXml(characterProperties, fontTable, charIdx, override
   return buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults: true, suppressBold: overrides?.bold === false, ...runDefaults });
 }
 
-function buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults, emitComplexScriptSize = false, emitExplicitComplexScriptSize = false, emitDefaultColor = false, emitDefaultHighlight = false, emitUnderlineHighlight = true, suppressBold = false, suppressComplexScriptSize = false, suppressComplexScriptToggles = false, suppressDefaultRunFonts = false, forceComplexScriptBoldToggle = false, emitBaselineVertAlign = false, emitExtendedCharacterToggles = false }) {
+function buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults, emitComplexScriptSize = false, emitExplicitComplexScriptSize = false, emitDefaultColor = false, emitDefaultHighlight = false, emitUnderlineHighlight = true, suppressBold = false, suppressComplexScriptSize = false, suppressComplexScriptToggles = false, suppressDefaultRunFonts = false, forceComplexScriptBoldToggle = false, emitBaselineVertAlign = false, emitExtendedCharacterToggles = false, emitRevisionMarkProperties = false, revisionAuthors = ["Unknown"] }) {
   if (!props && !includeDefaults) return "";
   if (!props) return `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:w w:val="100"/></w:rPr>`;
 
@@ -2121,6 +2181,10 @@ function buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults, emi
     // MS-DOC-SPEC/16 sprmCIstd stores the character style as an STSH index;
     // word-binary resolves that index to this OOXML styleId.
     parts.unshift(`<w:rStyle w:val="${escapeXml(props.styleId)}"/>`);
+  }
+  if (emitRevisionMarkProperties) {
+    const revisionPropertyXml = buildRevisionPropertyRunPropertyXml(props, revisionAuthors);
+    if (revisionPropertyXml) parts.unshift(revisionPropertyXml);
   }
 
   if (props.charSnapToGrid != null) {
@@ -2159,10 +2223,10 @@ function buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults, emi
   appendToggleRunProperty(parts, "dstrike", props.dstrike);
   appendToggleRunProperty(parts, "vanish", props.vanish);
   if (props.textColor != null) {
-    // MS-DOC color index 0 is automatic. WPS exports automatic text over an
-    // explicit shaded run as black, while plain table/header text stays auto.
-    const textColor = props.textColor === "auto" && props.background != null ? "000000" : props.textColor;
-    parts.push(`<w:color w:val="${textColor}"/>`);
+    // MS-DOC-SPEC/16 sprmCIco stores an Ico text color. Ico 0 is cvAuto, so
+    // preserve the parsed automatic color even when a separate shading SPRM is
+    // present; explicit black arrives from the parser as "000000".
+    parts.push(`<w:color w:val="${props.textColor}"/>`);
   } else if (emitDefaultColor) {
     parts.push(`<w:color w:val="auto"/>`);
   }
@@ -2276,6 +2340,19 @@ function buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults, emi
   return parts.length > 0 ? `<w:rPr>${parts.join("")}</w:rPr>` : "";
 }
 
+function buildRevisionPropertyRunPropertyXml(props, revisionAuthors = ["Unknown"]) {
+  // MS-DOC-SPEC/16 sprmCFRMarkIns/sprmCFRMarkDel can be applied to a paragraph
+  // mark character. In OOXML that paragraph-mark revision is represented as
+  // w:ins/w:del inside w:pPr/w:rPr rather than as a run wrapper.
+  if (props?.revisionMarkIns) {
+    return `<w:ins${buildRevisionMarkXml(props, "ins", revisionAuthors)}/>`;
+  }
+  if (props?.revisionMarkDel) {
+    return `<w:del${buildRevisionMarkXml(props, "del", revisionAuthors)}/>`;
+  }
+  return "";
+}
+
 function appendToggleRunProperty(parts, name, value) {
   if (value === true) {
     parts.push(`<w:${name}/>`);
@@ -2371,20 +2448,44 @@ function buildParagraphPropertiesXml(properties, paragraphMarkProperties = null,
     parts.push(`<w:textAlignment w:val="${properties.textAlignment}"/>`);
   }
 
-	  const paragraphRunProperties = buildRunPropertiesXmlFromProps(paragraphMarkProperties, fontTable, {
-	    includeDefaults: false,
-	    emitExplicitComplexScriptSize: paragraphMarkProperties?.langIdBidi != null,
-	    suppressComplexScriptSize: documentOptions.suppressComplexScriptSize,
-	  });
+		  const paragraphRunProperties = buildRunPropertiesXmlFromProps(paragraphMarkProperties, fontTable, {
+		    includeDefaults: false,
+		    emitExplicitComplexScriptSize: paragraphMarkProperties?.langIdBidi != null,
+		    suppressComplexScriptSize: documentOptions.suppressComplexScriptSize,
+		    emitRevisionMarkProperties: true,
+		    revisionAuthors: documentOptions.revisionAuthors,
+		  });
   if (paragraphRunProperties) {
     parts.push(paragraphRunProperties);
   }
+  appendParagraphPropertyChangeXml(parts, properties?.paragraphPropertyChange, documentOptions);
   if (sectionProperties) {
     const footerIds = getFooterIds(sectionIndex >= 0 ? sectionIndex : 0, documentOptions);
     parts.push(buildSectionPropertiesXml(sectionProperties, { ...footerIds, sectionIndex }));
   }
 
   return parts.length > 0 ? `<w:pPr>${parts.join("")}</w:pPr>` : "";
+}
+
+function appendParagraphPropertyChangeXml(parts, change, documentOptions = {}) {
+  if (!change?.mark?.fPropRMark) return;
+  // MS-DOC-SPEC/16 sprmPWall preserves the paragraph properties encountered
+  // before the wall; OOXML stores those former properties in w:pPrChange/w:pPr.
+  const previousPropertiesXml = buildParagraphPropertiesXml(
+    change.previous,
+    null,
+    [],
+    null,
+    null,
+    -1,
+    "",
+    documentOptions,
+  ) || "<w:pPr/>";
+  const attrs = buildRevisionMarkXml({
+    revisionAuthorIndex: change.mark.authorIndex,
+    revisionDate: change.mark.date,
+  }, "ins", documentOptions.revisionAuthors);
+  parts.push(`<w:pPrChange${attrs}>${previousPropertiesXml}</w:pPrChange>`);
 }
 
 function buildParagraphNumberingXml(properties, paragraphText, documentOptions = {}) {
@@ -2695,8 +2796,8 @@ function buildSectionPropertiesXml(properties = {}, { defaultFooterId, evenFoote
   if (section.sectionBidi) {
     parts.push(`<w:bidi/>`);
   }
-  if (section.rtlGutter) {
-    parts.push(`<w:rtlGutter/>`);
+  if (section.rtlGutterSpecified || section.rtlGutter) {
+    parts.push(section.rtlGutter ? `<w:rtlGutter/>` : `<w:rtlGutter w:val="0"/>`);
   }
   if (section.docGridType != null) {
     const docGridType = sectionDocGridTypeToXml(section.docGridType);
@@ -2767,8 +2868,12 @@ function buildSectionPaperSourceXml(section) {
 
 function buildSectionPageNumberXml(section) {
   const hasChapterNumbering = section.pageNumberChapterStyle != null && section.pageNumberChapterStyle > 0;
+  // MS-DOC-SPEC/16 sprmSNfcPgn explicitly stores the page-number format.
+  // Emit pgNumType whenever that parsed section format is present; restart
+  // and chapter numbering only add attributes to the same section property.
   const shouldEmit = section.pageNumberRestart
     || hasChapterNumbering
+    || section.pageNumberFormat != null
     || (section.docGridType !== 2 && !(section.docGridType != null && section.docGridCharSpace == null));
   if (!shouldEmit) return "";
 

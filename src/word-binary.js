@@ -1,5 +1,6 @@
 import { parseSprms, scanSprmRecords } from "./sprm.js";
 import { BRC_TYPE_NAMES, brcColorFromIco, colorRefToHex } from "./sprm.js";
+import { inflateRawSync } from "node:zlib";
 // sti→name mapping per MS-OI29500 §2.1.237 (Part 1 Section 17.7.4.9)
 export const STI_NAMES = ["Normal","heading 1","heading 2","heading 3","heading 4","heading 5","heading 6","heading 7","heading 8","heading 9","index 1","index 2","index 3","index 4","index 5","index 6","index 7","index 8","index 9","toc 1","toc 2","toc 3","toc 4","toc 5","toc 6","toc 7","toc 8","toc 9","Normal Indent","footnote text","annotation text","header","footer","index heading","caption","table of figures","envelope address","envelope return","footnote reference","annotation reference","line number","page number","endnote reference","endnote text","table of authorities","macro","toa heading","List","List Bullet","List Number","List 2","List 3","List 4","List 5","List Bullet 2","List Bullet 3","List Bullet 4","List Bullet 5","List Number 2","List Number 3","List Number 4","List Number 5","Title","Closing","Signature","Default Paragraph Font","Body Text","Body Text Indent","List Continue","List Continue 2","List Continue 3","List Continue 4","List Continue 5","Message Header","Subtitle","Salutation","Date","Body Text First Indent","Body Text First Indent 2","Note Heading","Body Text 2","Body Text 3","Body Text Indent 2","Body Text Indent 3","Block Text","Hyperlink","FollowedHyperlink","Strong","Emphasis","Document Map","Plain Text","E-mail Signature","HTML Top of Form","HTML Bottom of Form","Normal (Web)","HTML Acronym","HTML Address","HTML Cite","HTML Code","HTML Definition","HTML Keyboard","HTML Preformatted","HTML Sample","HTML Typewriter","HTML Variable","Normal Table","annotation subject","No List","Outline List 1","Outline List 2","Outline List 3","Table Simple 1","Table Simple 2","Table Simple 3","Table Classic 1","Table Classic 2","Table Classic 3","Table Classic 4","Table Colorful 1","Table Colorful 2","Table Colorful 3","Table Columns 1","Table Columns 2","Table Columns 3","Table Columns 4","Table Columns 5","Table Grid 1","Table Grid 2","Table Grid 3","Table Grid 4","Table Grid 5","Table Grid 6","Table Grid 7","Table Grid 8","Table List 1","Table List 2","Table List 3","Table List 4","Table List 5","Table List 6","Table List 7","Table List 8","Table 3D effects 1","Table 3D effects 2","Table 3D effects 3","Table Contemporary","Table Elegant","Table Professional","Table Subtle 1","Table Subtle 2","Table Web 1","Table Web 2","Table Web 3","Balloon Text","Table Grid","Table Theme","Placeholder Text","No Spacing","Light Shading","Light List","Light Grid","Medium Shading 1","Medium Shading 2","Medium List 1","Medium List 2","Medium Grid 1","Medium Grid 2","Medium Grid 3","Dark List","Colorful Shading","Colorful List","Colorful Grid","Light Shading Accent 1","Light List Accent 1","Light Grid Accent 1","Medium Shading 1 Accent 1","Medium Shading 2 Accent 1","Medium List 1 Accent 1","Revision","List Paragraph","Quote","Intense Quote","Medium List 2 Accent 1","Medium Grid 1 Accent 1","Medium Grid 2 Accent 1","Medium Grid 3 Accent 1","Dark List Accent 1","Colorful Shading Accent 1","Colorful List Accent 1","Colorful Grid Accent 1","Light Shading Accent 2","Light List Accent 2","Light Grid Accent 2","Medium Shading 1 Accent 2","Medium Shading 2 Accent 2","Medium List 1 Accent 2","Medium List 2 Accent 2","Medium Grid 1 Accent 2","Medium Grid 2 Accent 2","Medium Grid 3 Accent 2","Dark List Accent 2","Colorful Shading Accent 2","Colorful List Accent 2","Colorful Grid Accent 2","Light Shading Accent 3","Light List Accent 3","Light Grid Accent 3","Medium Shading 1 Accent 3","Medium Shading 2 Accent 3","Medium List 1 Accent 3","Medium List 2 Accent 3","Medium Grid 1 Accent 3","Medium Grid 2 Accent 3","Medium Grid 3 Accent 3","Dark List Accent 3","Colorful Shading Accent 3","Colorful List Accent 3","Colorful Grid Accent 3","Light Shading Accent 4","Light List Accent 4","Light Grid Accent 4","Medium Shading 1 Accent 4","Medium Shading 2 Accent 4","Medium List 1 Accent 4","Medium List 2 Accent 4","Medium Grid 1 Accent 4","Medium Grid 2 Accent 4","Medium Grid 3 Accent 4","Dark List Accent 4","Colorful Shading Accent 4","Colorful List Accent 4","Colorful Grid Accent 4","Light Shading Accent 5","Light List Accent 5","Light Grid Accent 5","Medium Shading 1 Accent 5","Medium Shading 2 Accent 5","Medium List 1 Accent 5","Medium List 2 Accent 5","Medium Grid 1 Accent 5","Medium Grid 2 Accent 5","Medium Grid 3 Accent 5","Dark List Accent 5","Colorful Shading Accent 5","Colorful List Accent 5","Colorful Grid Accent 5","Light Shading Accent 6","Light List Accent 6","Light Grid Accent 6","Medium Shading 1 Accent 6","Medium Shading 2 Accent 6","Medium List 1 Accent 6","Medium List 2 Accent 6","Medium Grid 1 Accent 6","Medium Grid 2 Accent 6","Medium Grid 3 Accent 6","Dark List Accent 6","Colorful Shading Accent 6","Colorful List Accent 6","Colorful Grid Accent 6"];
 
@@ -38,8 +39,21 @@ const FIB_FC_WSS_INDEX = 30;
 const FIB_FC_DOP_INDEX = 31; // 0x1F per FibRgFcLcb97
 const FIB_FC_PLCFSPAMOM_INDEX = 40;
 const FIB_FC_PLCFSPAHDR_INDEX = 41;
+const FIB_FC_DGGINFO_INDEX = 50;
 const FIB_FC_STTBFRMARK_INDEX = 51; // MS-DOC-SPEC/15 FibRgFcLcb97 fcSttbfRMark at offset 0x232
 const SELSF_SIZE = 36;
+const OFFICE_ART_DGG_CONTAINER = 0xf000;
+const OFFICE_ART_DG_CONTAINER = 0xf002;
+const OFFICE_ART_SPGR_CONTAINER = 0xf003;
+const OFFICE_ART_SP_CONTAINER = 0xf004;
+const OFFICE_ART_FSP = 0xf00a;
+const OFFICE_ART_FOPT = 0xf00b;
+const OFFICE_ART_CLIENT_DATA = 0xf012;
+const OFFICE_ART_TERTIARY_FOPT = 0xf122;
+const OFFICE_ART_SHAPE_NAME_PID = 0x0380;
+const OFFICE_ART_GFXDATA_PID = 0x03a9;
+const WPS_DRAWING_RELATIVE_HEIGHT_BASE = 0x0f000000;
+const WPS_DRAWING_RELATIVE_HEIGHT_STEP = 0x400;
 
 const STSH_NIL_BASE = 0xfff0;
 const STSH_STD_HEADER_SIZE_WITH_POST2000 = 18;
@@ -74,6 +88,8 @@ export function extractWordBinaryDocument({ wordDocument, table0, table1 = null,
   const defaultTabStop = dop.dxaTab;
   const plcfHdd = parsePlcfHdd(tableStream, fib);
   const bookmarks = parseStandardBookmarks(tableStream, fib);
+  const officeArtShapes = parseOfficeArtContent(tableStream, fib);
+  const shapeAnchors = attachOfficeArtToShapeAnchors(parseMainShapeAnchors(tableStream, fib), officeArtShapes);
   const revisionAuthors = parseRevisionAuthors(tableStream, fib);
   const lastSelection = parseLastSelection(tableStream, fib, rawText.length);
   const paragraphProperties = extractParagraphProperties(wordDocument, tableStream, fib, bodyText, styles, pieces);
@@ -102,6 +118,7 @@ export function extractWordBinaryDocument({ wordDocument, table0, table1 = null,
     tableRows,
     plcfHdd,
     bookmarks,
+    shapeAnchors,
     revisionAuthors,
     lastSelection,
     dop,
@@ -143,6 +160,7 @@ function readFib(wordDocument) {
   const dopOffset = FIB_FC_LCB_START + FIB_FC_DOP_INDEX * 8;
   const plcfSpaMomOffset = FIB_FC_LCB_START + FIB_FC_PLCFSPAMOM_INDEX * 8;
   const plcfSpaHdrOffset = FIB_FC_LCB_START + FIB_FC_PLCFSPAHDR_INDEX * 8;
+  const dggInfoOffset = FIB_FC_LCB_START + FIB_FC_DGGINFO_INDEX * 8;
   const sttbfRMarkOffset = FIB_FC_LCB_START + FIB_FC_STTBFRMARK_INDEX * 8;
   if (tableStreamOffset + 8 > FIB_FC_LCB_START + fcLcbCount * 4) {
     throw new Error("Unimplemented Word binary document variant: FIB does not contain fcClx/lcbClx");
@@ -206,6 +224,8 @@ function readFib(wordDocument) {
     lcbPlcSpaMom: plcfSpaMomOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(plcfSpaMomOffset + 4) : 0,
     fcPlcSpaHdr: plcfSpaHdrOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(plcfSpaHdrOffset) : 0,
     lcbPlcSpaHdr: plcfSpaHdrOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(plcfSpaHdrOffset + 4) : 0,
+    fcDggInfo: dggInfoOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(dggInfoOffset) : 0,
+    lcbDggInfo: dggInfoOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(dggInfoOffset + 4) : 0,
     fcSttbfRMark: sttbfRMarkOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(sttbfRMarkOffset) : 0,
     lcbSttbfRMark: sttbfRMarkOffset + 8 <= FIB_FC_LCB_START + fcLcbCount * 4 ? wordDocument.readUInt32LE(sttbfRMarkOffset + 4) : 0,
     characterCounts: {
@@ -634,8 +654,8 @@ function parseStandardBookmarks(tableStream, fib) {
   if (!names.length) return [];
 
   // MS-DOC-SPEC/15: SttbfBkmk, Plcfbkf, and Plcfbkl are parallel tables.
-  // LibreOffice's WW8PLCFx_Book reads Plcfbkf with a 4-byte BKF.ibkl data
-  // element that indexes the end CP in Plcfbkl.
+  // MS-DOC-SPEC/19 FBKF stores a 2-byte ibkl followed by a 2-byte BKC.
+  // ibkl indexes the end CP in Plcfbkl.
   const bkf = tableStream.subarray(fib.fcPlcfBkf, fib.fcPlcfBkf + fib.lcbPlcfBkf);
   const bkl = tableStream.subarray(fib.fcPlcfBkl, fib.fcPlcfBkl + fib.lcbPlcfBkl);
   const dataBytes = fib.lcbPlcfBkf - (names.length + 1) * 4;
@@ -653,12 +673,13 @@ function parseStandardBookmarks(tableStream, fib) {
   return names.map((name, index) => {
     const start = bkf.readUInt32LE(index * 4);
     const dataOffset = (names.length + 1) * 4 + index * bkfDataSize;
-    const endIndex = bkf.readUInt32LE(dataOffset);
+    const endIndex = bkf.readUInt16LE(dataOffset);
     if (endIndex >= names.length) {
       throw new Error(`Invalid Word bookmark ${name}: end index ${endIndex} is outside Plcfbkl`);
     }
+    const bkc = bkf.readUInt16LE(dataOffset + 2);
     const end = bkl.readUInt32LE(endIndex * 4);
-    return { id: index, name, cpStart: start, cpEnd: end };
+    return { id: index, name, cpStart: start, cpEnd: end, bkc };
   });
 }
 
@@ -712,6 +733,289 @@ function assertTableRange(tableStream, fc, lcb, label) {
   }
 }
 
+function parseOfficeArtContent(tableStream, fib) {
+  if (!fib.fcDggInfo && !fib.lcbDggInfo) return new Map();
+  assertTableRange(tableStream, fib.fcDggInfo, fib.lcbDggInfo, "OfficeArtContent");
+  const content = tableStream.subarray(fib.fcDggInfo, fib.fcDggInfo + fib.lcbDggInfo);
+  if (content.length < 8) {
+    throw new Error("Invalid Word binary document: truncated OfficeArtContent");
+  }
+
+  // MS-DOC-SPEC/15 fcDggInfo/lcbDggInfo point to OfficeArtContent.
+  // MS-DOC-SPEC/19 OfficeArtContent begins with an OfficeArtDggContainer
+  // followed by OfficeArtWordDrawing records, each prefixed by dgglbl.
+  const dgg = readOfficeArtRecord(content, 0, content.length);
+  if (dgg.type !== OFFICE_ART_DGG_CONTAINER || dgg.ver !== 0x0f) {
+    throw new Error(`Out-of-spec OfficeArtContent: expected DggContainer, got type 0x${dgg.type.toString(16)}`);
+  }
+
+  const shapes = new Map();
+  let off = dgg.end;
+  while (off < content.length) {
+    const dgglbl = content[off];
+    off += 1;
+    const drawing = readOfficeArtRecord(content, off, content.length);
+    if (drawing.type !== OFFICE_ART_DG_CONTAINER || drawing.ver !== 0x0f) {
+      throw new Error(`Out-of-spec OfficeArtWordDrawing: expected DgContainer, got type 0x${drawing.type.toString(16)}`);
+    }
+    if (dgglbl === 0) {
+      for (const shape of parseOfficeArtShapeContainers(content, drawing.content, drawing.end)) {
+        if (shape.spid != null) shapes.set(shape.spid, shape);
+      }
+    }
+    off = drawing.end;
+  }
+  return shapes;
+}
+
+function parseOfficeArtShapeContainers(buffer, start, end) {
+  const shapes = [];
+  const clientDataBySpid = parseOfficeArtClientData(buffer, start, end);
+  let drawingOrder = 0;
+
+  function walk(off, limit) {
+    while (off + 8 <= limit) {
+      const record = readOfficeArtRecord(buffer, off, limit);
+      if (record.type === OFFICE_ART_SP_CONTAINER) {
+        const shape = parseOfficeArtShapeContainer(buffer, record);
+        if (shape?.spid != null) {
+          const clientData = clientDataBySpid.get(shape.spid) ?? null;
+          shapes.push({
+            ...shape,
+            drawingOrder: clientData?.drawingOrder ?? drawingOrder,
+            clientData,
+          });
+          drawingOrder += 1;
+        }
+      } else if (record.ver === 0x0f || record.type === OFFICE_ART_SPGR_CONTAINER) {
+        walk(record.content, record.end);
+      }
+      off = record.end;
+    }
+    if (off !== limit) {
+      throw new Error("Invalid Word binary document: OfficeArt container has trailing partial record");
+    }
+  }
+
+  walk(start, end);
+  return shapes;
+}
+
+function parseOfficeArtShapeContainer(buffer, record) {
+  let off = record.content;
+  let fsp = null;
+  let fopt = null;
+  let tertiaryFopt = null;
+  while (off + 8 <= record.end) {
+    const child = readOfficeArtRecord(buffer, off, record.end);
+    if (child.type === OFFICE_ART_FSP) fsp = child;
+    if (child.type === OFFICE_ART_FOPT) fopt = child;
+    if (child.type === OFFICE_ART_TERTIARY_FOPT) tertiaryFopt = child;
+    off = child.end;
+  }
+  if (off !== record.end) {
+    throw new Error("Invalid Word binary document: OfficeArtSpContainer has trailing partial record");
+  }
+  if (!fsp) return null;
+  if (fsp.len !== 8) {
+    throw new Error(`Out-of-spec OfficeArtFSP: expected 8 bytes, got ${fsp.len}`);
+  }
+
+  const shape = {
+    spid: buffer.readUInt32LE(fsp.content),
+    fspFlags: buffer.readUInt32LE(fsp.content + 4),
+  };
+  if (fopt) {
+    const properties = parseOfficeArtFopt(buffer, fopt, "OfficeArtFOPT");
+    const nameProperty = properties.find((prop) => prop.pid === OFFICE_ART_SHAPE_NAME_PID && prop.complexData);
+    if (nameProperty) {
+      shape.name = stripNullTerminator(nameProperty.complexData.toString("utf16le"));
+      const idMatch = shape.name.match(/(\d+)$/);
+      if (idMatch) shape.docPrId = Number.parseInt(idMatch[1], 10);
+    }
+  }
+  if (tertiaryFopt) {
+    const properties = parseOfficeArtFopt(buffer, tertiaryFopt, "OfficeArtTertiaryFOPT");
+    const gfxProperty = properties.find((prop) => prop.pid === OFFICE_ART_GFXDATA_PID && prop.complexData);
+    if (gfxProperty) {
+      shape.gfxData = extractOfficeArtGfxData(gfxProperty.complexData);
+      const e2oDoc = parseZipEntries(shape.gfxData).get("drs/e2oDoc.xml");
+      if (e2oDoc) {
+        const cNvPr = parseEmbeddedShapeCNvPr(e2oDoc.toString("utf8"));
+        if (cNvPr) {
+          shape.docPrId = cNvPr.id;
+          shape.name = cNvPr.name;
+        }
+      }
+    }
+  }
+  return shape;
+}
+
+function parseOfficeArtClientData(buffer, start, end) {
+  const clientDataBySpid = new Map();
+  let drawingOrder = 0;
+
+  function walk(off, limit) {
+    while (off + 8 <= limit) {
+      const record = readOfficeArtRecord(buffer, off, limit);
+      if (record.type === OFFICE_ART_CLIENT_DATA) {
+        if (record.len >= 16) {
+          const storedOrder = buffer.readUInt32LE(record.content);
+          const spid = buffer.readUInt32LE(record.content + 12);
+          clientDataBySpid.set(spid, { drawingOrder: storedOrder, rawOrder: drawingOrder });
+          drawingOrder += 1;
+        }
+      } else if (record.ver === 0x0f) {
+        walk(record.content, record.end);
+      }
+      off = record.end;
+    }
+  }
+
+  walk(start, end);
+  return clientDataBySpid;
+}
+
+function attachOfficeArtToShapeAnchors(shapeAnchors, officeArtShapes) {
+  const matchedSpids = shapeAnchors.map((shape) => officeArtShapes.get(shape.lid)?.spid).filter(Number.isInteger);
+  const fallbackSpid = matchedSpids.length ? Math.min(...matchedSpids) : null;
+  return shapeAnchors.map((shape) => {
+    const officeArt = officeArtShapes.get(shape.lid);
+    if (!officeArt) return shape;
+    return {
+      ...shape,
+      officeArt: {
+        spid: officeArt.spid,
+        fspFlags: officeArt.fspFlags,
+        drawingOrder: officeArt.drawingOrder,
+        relativeHeight: WPS_DRAWING_RELATIVE_HEIGHT_BASE + (officeArt.drawingOrder + 1) * WPS_DRAWING_RELATIVE_HEIGHT_STEP,
+        docPrId: officeArt.docPrId,
+        name: officeArt.name,
+        fallbackSpid,
+        gfxData: officeArt.gfxData,
+      },
+    };
+  });
+}
+
+function readOfficeArtRecord(buffer, off, limit) {
+  if (off + 8 > limit) {
+    throw new Error("Invalid Word binary document: truncated OfficeArt record header");
+  }
+  const verInst = buffer.readUInt16LE(off);
+  const len = buffer.readUInt32LE(off + 4);
+  const end = off + 8 + len;
+  if (end > limit) {
+    throw new Error(`Invalid Word binary document: OfficeArt record 0x${buffer.readUInt16LE(off + 2).toString(16)} exceeds its container`);
+  }
+  return {
+    off,
+    ver: verInst & 0x000f,
+    inst: verInst >>> 4,
+    type: buffer.readUInt16LE(off + 2),
+    len,
+    content: off + 8,
+    end,
+  };
+}
+
+function parseOfficeArtFopt(buffer, record, label) {
+  const fixedEnd = record.content + record.inst * 6;
+  if (fixedEnd > record.end) {
+    throw new Error(`Invalid Word binary document: ${label} property table exceeds record`);
+  }
+
+  const properties = [];
+  let complexOff = fixedEnd;
+  for (let i = 0; i < record.inst; i += 1) {
+    const off = record.content + i * 6;
+    const opid = buffer.readUInt16LE(off);
+    const op = buffer.readUInt32LE(off + 2);
+    const isComplex = (opid & 0x8000) !== 0;
+    const property = {
+      opid,
+      pid: opid & 0x3fff,
+      isBlip: (opid & 0x4000) !== 0,
+      value: op,
+      complexData: null,
+    };
+    if (isComplex) {
+      if (complexOff + op > record.end) {
+        throw new Error(`Invalid Word binary document: ${label} complex property exceeds record`);
+      }
+      property.complexData = buffer.subarray(complexOff, complexOff + op);
+      complexOff += op;
+    }
+    properties.push(property);
+  }
+  return properties;
+}
+
+function extractOfficeArtGfxData(data) {
+  const zipOffset = data.indexOf(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+  if (zipOffset < 0) {
+    throw new Error("Invalid Word binary document: OfficeArt gfxdata property does not contain an OOXML package");
+  }
+  return Buffer.from(data.subarray(zipOffset));
+}
+
+function parseZipEntries(zip) {
+  const entries = new Map();
+  let off = 0;
+  while (off + 30 <= zip.length) {
+    const signature = zip.readUInt32LE(off);
+    if (signature !== 0x04034b50) {
+      off += 1;
+      continue;
+    }
+    const method = zip.readUInt16LE(off + 8);
+    const compressedSize = zip.readUInt32LE(off + 18);
+    const fileNameLength = zip.readUInt16LE(off + 26);
+    const extraLength = zip.readUInt16LE(off + 28);
+    const nameStart = off + 30;
+    const dataStart = nameStart + fileNameLength + extraLength;
+    const dataEnd = dataStart + compressedSize;
+    if (dataEnd > zip.length) {
+      throw new Error("Invalid Word binary document: embedded OfficeArt package entry exceeds package length");
+    }
+    const name = zip.subarray(nameStart, nameStart + fileNameLength).toString("utf8");
+    const data = zip.subarray(dataStart, dataEnd);
+    if (method === 0) {
+      entries.set(name, Buffer.from(data));
+    } else if (method === 8) {
+      entries.set(name, inflateRawSync(data));
+    } else {
+      throw new Error(`Unimplemented embedded OfficeArt package compression method ${method}`);
+    }
+    off = dataEnd;
+  }
+  return entries;
+}
+
+function parseEmbeddedShapeCNvPr(xml) {
+  const match = xml.match(/<wps:cNvPr\b[^>]*\bid="([^"]+)"[^>]*\bname="([^"]*)"/);
+  if (!match) return null;
+  const id = Number.parseInt(match[1], 10);
+  if (!Number.isInteger(id)) {
+    throw new Error(`Invalid Word binary document: embedded shape cNvPr id ${JSON.stringify(match[1])} is not an integer`);
+  }
+  return { id, name: unescapeXml(match[2]) };
+}
+
+function stripNullTerminator(value) {
+  return value.replace(/\u0000+$/g, "");
+}
+
+function unescapeXml(value) {
+  return value
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
 export function parseSttbfRMark(sttbf) {
   // MS-DOC-SPEC/19 SttbfRMark: extended Unicode STTB, no extra data, first
   // entry MUST be "Unknown".
@@ -720,6 +1024,61 @@ export function parseSttbfRMark(sttbf) {
     throw new Error(`Out-of-spec SttbfRMark: first author must be Unknown, got ${JSON.stringify(authors[0] ?? "")}`);
   }
   return authors;
+}
+
+function parseMainShapeAnchors(tableStream, fib) {
+  if (!fib.fcPlcSpaMom && !fib.lcbPlcSpaMom) return [];
+  assertTableRange(tableStream, fib.fcPlcSpaMom, fib.lcbPlcSpaMom, "PlcfSpaMom");
+  const plcf = tableStream.subarray(fib.fcPlcSpaMom, fib.fcPlcSpaMom + fib.lcbPlcSpaMom);
+  // MS-DOC-SPEC/15 fcPlcSpaMom/lcbPlcSpaMom point to PlcfSpa. A PlcfSpa is
+  // a PLC: (n + 1) CPs followed by n fixed-size Spa records. MS-DOC-SPEC/19
+  // Spa is 26 bytes.
+  const spaSize = 26;
+  if (plcf.length < 4 || (plcf.length - 4) % (4 + spaSize) !== 0) {
+    throw new Error(`Invalid Word binary document: PlcfSpaMom length ${plcf.length} is not valid`);
+  }
+  const count = (plcf.length - 4) / (4 + spaSize);
+  const cps = [];
+  for (let i = 0; i <= count; i += 1) {
+    const cp = plcf.readUInt32LE(i * 4);
+    if (i < count && cp > fib.characterCounts.body) {
+      throw new Error(`Out-of-spec PlcfSpaMom CP ${cp} exceeds body character count ${fib.characterCounts.body}`);
+    }
+    if (i > 0 && cp < cps[i - 1]) {
+      throw new Error("Out-of-spec PlcfSpaMom CPs are not sorted");
+    }
+    cps.push(cp);
+  }
+  const shapes = [];
+  let off = (count + 1) * 4;
+  for (let i = 0; i < count; i += 1, off += spaSize) {
+    const spa = plcf.subarray(off, off + spaSize);
+    const flags = spa.readUInt16LE(20);
+    const bx = (flags >> 1) & 0x03;
+    const by = (flags >> 3) & 0x03;
+    const wr = (flags >> 5) & 0x0f;
+    const wrk = (flags >> 9) & 0x0f;
+    const fRcaSimple = (flags >> 13) & 0x01;
+    if (fRcaSimple !== 0) {
+      throw new Error("Out-of-spec Spa.fRcaSimple must be zero");
+    }
+    shapes.push({
+      cpStart: cps[i],
+      cpEnd: cps[i + 1],
+      lid: spa.readUInt32LE(0),
+      xaLeft: spa.readInt32LE(4),
+      yaTop: spa.readInt32LE(8),
+      xaRight: spa.readInt32LE(12),
+      yaBottom: spa.readInt32LE(16),
+      bx,
+      by,
+      wr,
+      wrk,
+      fBelowText: ((flags >> 14) & 0x01) === 1,
+      fAnchorLock: ((flags >> 15) & 0x01) === 1,
+    });
+  }
+  return shapes;
 }
 
 function parseSttbfBkmk(sttbf) {
@@ -946,6 +1305,7 @@ function buildParagraphPropertiesFromSprms(parsed) {
     lineNumberCount: parsed.lineNumberCount ?? null,
     paragraphBorders: parsed.paragraphBorders ?? null,
     paragraphShading: parsed.paragraphShading ?? null,
+    outlineLevel: parsed.outlineLevel ?? null,
     tablePosition: parsed.tablePosition ?? null,
     tableNoAllowOverlap: parsed.tableNoAllowOverlap ?? null,
   };
@@ -2289,6 +2649,7 @@ function buildGenericTableRow(paragraphRanges, paragraphProperties, bodyText, ro
     cellShading: rowProperty?.cellShading ?? null,
     cellBorderSideArrays: rowProperty?.cellBorderSideArrays ?? null,
     cellBorderAssignments: rowProperty?.cellBorderAssignments ?? null,
+    cellWidthAssignments: rowProperty?.cellWidthAssignments ?? null,
     tableStyleIndex: rowProperty?.tableStyleIndex ?? null,
     tableBorders: rowProperty?.tableBorders ?? null,
     tableBordersExplicit: rowProperty?.tableBordersExplicit === true,
@@ -2319,14 +2680,10 @@ function buildTableGridPositions(rows) {
     throw new Error("Unable to infer table grid positions: no row column geometry was parsed");
   }
 
-  const positions = [...positionSet].sort((a, b) => a - b);
-  const merged = [positions[0]];
-  for (let i = 1; i < positions.length; i += 1) {
-    if (Math.abs(positions[i] - merged.at(-1)) > 20) {
-      merged.push(positions[i]);
-    }
-  }
-  return merged;
+  // MS-DOC-SPEC/19 TDefTable stores explicit table-cell boundary positions.
+  // Preserve even very narrow parsed columns; WPS exports them as OOXML grid
+  // columns instead of merging nearby boundaries.
+  return [...positionSet].sort((a, b) => a - b);
 }
 
 function positionsToWidths(positions) {
@@ -2369,6 +2726,7 @@ function applyRowGeometry(rows, gridPositions, sections = null) {
     applyCellFlags(row);
     applyCellBorderSideArrays(row);
     applyCellBorderAssignments(row);
+    applyCellWidthAssignments(row);
     applyVerticalMergeAssignments(row);
     applyVerticalAlignAssignments(row);
   }
@@ -2414,6 +2772,19 @@ function applyCellBorderAssignments(row) {
       if (assignment.changeLeft) cell.borders.left = assignment.border;
       if (assignment.changeBottom) cell.borders.bottom = assignment.border;
       if (assignment.changeRight) cell.borders.right = assignment.border;
+    }
+  }
+}
+
+function applyCellWidthAssignments(row) {
+  if (!row.cellWidthAssignments || row.cellWidthAssignments.length === 0) return;
+  for (const assignment of row.cellWidthAssignments) {
+    const start = Math.max(0, assignment.itcFirst);
+    const end = Math.min(row.cells.length, assignment.itcLim);
+    for (let ci = start; ci < end; ci += 1) {
+      const cell = row.cells[ci];
+      if (!cell) continue;
+      cell.preferredWidth = assignment.width;
     }
   }
 }
@@ -2625,10 +2996,12 @@ function collectTDefTableEntries(wordDocument, tableStream, fib, pieces, dataStr
         cellShading: info.cellShading,
         cellBorderSideArrays: info.cellBorderSideArrays,
         cellBorderAssignments: info.cellBorderAssignments,
+        cellWidthAssignments: info.cellWidthAssignments,
         tableWidth: info.tableWidth,
         tableWidthType: info.tableWidthType,
         tableIndent: info.tableIndent,
         tableJustification: info.tableJustification,
+        tableStyleIndex: info.tableStyleIndex,
         tableAutofit: info.tableAutofit,
         rowHeight: info.rowHeight,
         rowHeightRule: info.rowHeightRule,
@@ -2683,6 +3056,7 @@ function parseTableRowSprms(data, dataStream = null) {
   let cellShading = [];
   let cellBorderAssignments = [];
   let cellBorderSideArrays = {};
+  let cellWidthAssignments = [];
   const cellMarginCandidates = [];
   const vMergeAssignments = [];
   const vAlignAssignments = [];
@@ -2816,6 +3190,12 @@ function parseTableRowSprms(data, dataStream = null) {
         const candidate = parseTableCellPadding(data.subarray(off + 3, off + 3 + cb), sprm === 0xD634);
         if (candidate) cellMarginCandidates.push(candidate);
       }
+    } else if (sprm === 0xD635) {
+      const cb = data[off + 2];
+      size = cb + 1;
+      if (off + 3 + cb <= data.length) {
+        cellWidthAssignments.push(parseTableCellWidthOperand(data.subarray(off + 3, off + 3 + cb)));
+      }
     } else if (sprm === 0x9407) {
       if (off + 4 <= data.length) {
         const height = data.readInt16LE(off + 2);
@@ -2867,6 +3247,7 @@ function parseTableRowSprms(data, dataStream = null) {
     cellShading,
     cellBorderSideArrays,
     cellBorderAssignments,
+    cellWidthAssignments,
     tableWidth,
     tableWidthType,
     tableIndent,
@@ -2934,6 +3315,51 @@ function parseTableIndent(data) {
     return { width: widthValue, type: "dxa" };
   }
   throw new Error(`Out-of-spec sprmTWidthIndent width type ${widthType}`);
+}
+
+function parseTableCellWidthOperand(payload) {
+  // MS-DOC-SPEC/19 TableCellWidthOperand: cb MUST be 5; after cb the
+  // operand stores ItcFirstLim plus an FtsWWidth_TablePart.
+  if (!payload || payload.length !== 5) {
+    throw new Error(`Invalid sprmTCellWidth operand length ${payload?.length ?? 0}`);
+  }
+  const itcFirst = payload[0];
+  const itcLim = payload[1];
+  if (itcLim <= itcFirst || itcLim > 64) {
+    throw new Error(`Out-of-spec sprmTCellWidth cell range ${itcFirst}-${itcLim}`);
+  }
+  const width = parseTablePartWidth(payload.subarray(2, 5), "sprmTCellWidth");
+  return { itcFirst, itcLim, width };
+}
+
+function parseTablePartWidth(data, label) {
+  if (!data || data.length < 3) {
+    throw new Error(`Truncated ${label} FtsWWidth_TablePart`);
+  }
+  const widthType = data[0];
+  const widthValue = data.readUInt16LE(1);
+  if (widthType === 0) {
+    return null;
+  }
+  if (widthType === 1) {
+    if (widthValue !== 0) {
+      throw new Error(`Invalid ${label} auto width ${widthValue}`);
+    }
+    return { type: "auto", value: 0 };
+  }
+  if (widthType === 2) {
+    if (widthValue > 5000) {
+      throw new Error(`Out-of-spec ${label} percent width ${widthValue}`);
+    }
+    return { type: "pct", value: widthValue };
+  }
+  if (widthType === 3) {
+    if (widthValue > 31680) {
+      throw new Error(`Out-of-spec ${label} dxa width ${widthValue}`);
+    }
+    return { type: "dxa", value: widthValue };
+  }
+  throw new Error(`Out-of-spec ${label} width type ${widthType}`);
 }
 
 function parseTableJustification(value, sprm) {

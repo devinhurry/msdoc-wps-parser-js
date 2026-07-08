@@ -1,4 +1,5 @@
 import { writeFile } from "node:fs/promises";
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { lcidToBcp47 } from "./lcid.js";
 import { readWpsFile } from "./wps.js";
 import { STI_NAMES } from "./word-binary.js";
@@ -165,7 +166,17 @@ function buildSettingsXml(wpsDocument = {}) {
     parts.push(`<w:writeProtection w:recommended="1"/>`);
   }
 
-  parts.push(`<w:zoom w:percent="${noHeaderLineGrid || hasNegativeGridCharSpace ? 130 : 127}"/>`);
+  // MS-DOC-SPEC/15 fc/lcbPlcSpaMom and fc/lcbPlcSpaHdr identify parsed
+  // body/header shape anchors; MS-DOC-SPEC/17 DopBase.fRevMarking identifies
+  // active revision tracking. WPS normalizes saved zoom to its 130% bucket
+  // for these parsed visual/revision states as well as headerless or negative
+  // East-Asian grid sections.
+  const useWpsExpandedZoom = noHeaderLineGrid
+    || hasNegativeGridCharSpace
+    || hasMainShapeAnchors
+    || hasHeaderShapeAnchors
+    || dop?.fRevMarking;
+  parts.push(`<w:zoom w:percent="${useWpsExpandedZoom ? 130 : 127}"/>`);
 
 	  // MS-DOC-SPEC/17 §DopBase.l fEmbedFonts and §Dop97.D fSubsetFonts:
   //   <w:embedTrueTypeFonts/>   iff DopBase.fEmbedFonts (ECMA-376 §17.8.3.8)
@@ -855,7 +866,7 @@ function createCompactGridHeaderFooterPlan(sections = []) {
       continue;
     }
 
-    if (landscape && !nextLandscape && !emittedLandscapeHeader) {
+    if (landscape && !nextLandscape && !emittedLandscapeHeader && sections[i + 1]?.properties?.docGridLinePitch !== props.docGridLinePitch) {
       addHeader(i, "defaultHeaderId");
       emittedLandscapeHeader = true;
       continue;
@@ -917,6 +928,10 @@ export function wpsToDocxBuffer(wpsDocument, options = {}) {
     resolveCharUnitIndentFromFont: hasLineGridWithoutCharSpace,
     suppressComplexScriptSize: !hasEastAsianGrid,
     hasEastAsianGrid,
+    fib: wpsDocument.fib,
+    dop: wpsDocument.dop,
+    shapeAnchors: wpsDocument.shapeAnchors ?? [],
+    sections,
     hasIncompleteEastAsianGrid: sections.some((section) => (
       (section?.properties?.docGridType === 1 || section?.properties?.docGridType === 2)
       && section?.properties?.docGridCharSpace == null
@@ -1123,7 +1138,16 @@ function createDocumentXml(rawText, paragraphProperties = [], characterPropertie
   const finalSectionIdx = allSections.length - 1;
   const finalFooterIds = getFooterIds(finalSectionIdx, documentOptions);
   const finalSectionXml = buildSectionPropertiesXml(finalSection, { ...finalFooterIds, final: true, sectionIndex: finalSectionIdx });
-  const backgroundXml = sections.some((section) => section?.properties?.docGridType === 2 && section?.properties?.docGridCharSpace != null)
+  const hasBodyOrHeaderShapes = (documentOptions.fib?.lcbPlcSpaMom ?? 0) > 0
+    || (documentOptions.fib?.lcbPlcSpaHdr ?? 0) > 0;
+  // MS-DOC-SPEC/15 FibRgFcLcb97.fc/lcbPlcSpaMom and fc/lcbPlcSpaHdr
+  // identify body/header shape-anchor PLCs, and MS-DOC-SPEC/17
+  // DopBase.fRevMarking records active revision tracking. WPS emits the
+  // OOXML document background for parsed grid-2 documents only while those
+  // structures do not take over document-level visual state.
+  const backgroundXml = !hasBodyOrHeaderShapes
+    && !documentOptions.dop?.fRevMarking
+    && sections.some((section) => section?.properties?.docGridType === 2 && section?.properties?.docGridCharSpace != null)
     ? `  <w:background w:color="FFFFFF"/>\n`
     : "";
 
@@ -1380,7 +1404,7 @@ function tableRowToXml(row, rawText, paragraphProperties, paragraphRanges, chara
   const rowHeight = row.rowHeight;
   const rowHeightRule = row.rowHeightRule === 1 ? "exact" : "atLeast";
 
-  const trPrParts = [`        <w:trPr>`];
+  const trPrParts = [];
 
   // Calculate grid column coverage
   if (table && table.gridCols) {
@@ -1430,14 +1454,16 @@ function tableRowToXml(row, rawText, paragraphProperties, paragraphRanges, chara
   if (row.tableJustification && row.tableJustification !== "left") {
     trPrParts.push(`          <w:jc w:val="${row.tableJustification}"/>`);
   }
-  trPrParts.push(`        </w:trPr>\n`);
+  const trPrXml = trPrParts.length > 0
+    ? `        <w:trPr>\n${trPrParts.join("\n")}\n        </w:trPr>\n`
+    : "";
 
   const cellsXml = row.cells
     .map((cell, cellIndex) => tableCellToXml(cell, rawText, paragraphProperties, paragraphRanges, characterProperties, fontTable, table, cellIndex, row, documentOptions))
     .join("");
 
   const rowParaId = nextParaId();
-  return `      <w:tr w14:paraId="${rowParaId}">\n${trPrParts.join("\n")}${cellsXml}      </w:tr>\n`;
+  return `      <w:tr w14:paraId="${rowParaId}">\n${trPrXml}${cellsXml}      </w:tr>\n`;
 }
 
 function tableCellToXml(cell, rawText, paragraphProperties, paragraphRanges, characterProperties, fontTable, table = null, cellIndex = 0, row = null, documentOptions = {}) {
@@ -1472,6 +1498,11 @@ function tableCellToXml(cell, rawText, paragraphProperties, paragraphRanges, cha
 }
 
 function buildTableCellWidthXml(table, row, cell, cellIndex) {
+  if (cell?.preferredWidth) {
+    // MS-DOC-SPEC/16 sprmTCellWidth stores a TableCellWidthOperand whose
+    // FtsWWidth_TablePart is already in OOXML-compatible pct/dxa units.
+    return `<w:tcW w:w="${cell.preferredWidth.value}" w:type="${cell.preferredWidth.type}"/>`;
+  }
   if (table?.tableWidthType === "pct" && table?.tableWidth != null && table?.gridCols?.length) {
     const gridStart = row?.cells
       ?.slice(0, cellIndex)
@@ -1494,9 +1525,7 @@ function buildTableCellWidthXml(table, row, cell, cellIndex) {
 
 function buildCellBordersXml(table, cell, cellIndex, documentOptions = {}) {
   const parts = [];
-  if (cell?.vMerge === "continue" && cell?.borders?.top?.style === "none") {
-    parts.push(`<w:top w:val="nil"/>`);
-  } else if (cell?.borders?.top?.style) {
+  if (cell?.borders?.top?.style) {
     parts.push(buildCellBorderSideXml("top", cell.borders.top, table, documentOptions));
   }
   if (cell?.borders?.left?.style) {
@@ -1507,14 +1536,6 @@ function buildCellBordersXml(table, cell, cellIndex, documentOptions = {}) {
   }
   if (cell?.borders?.right?.style) {
     parts.push(buildCellBorderSideXml("right", cell.borders.right, table, documentOptions));
-  }
-  if (table?.tableAutofit && table?.tableBorders?.insideV?.style !== "none") {
-    if (cellIndex > 0 && !cell?.borders?.left?.nil && (!cell?.borders?.left?.style || cell.borders.left.style === "none")) {
-      parts.push(`<w:left w:val="nil"/>`);
-    }
-    if (cellIndex < table.gridCols.length - 1 && !cell?.borders?.right?.nil && (!cell?.borders?.right?.style || cell.borders.right.style === "none")) {
-      parts.push(`<w:right w:val="nil"/>`);
-    }
   }
   const borderParts = parts.filter(Boolean);
   if (borderParts.length === 0) return "";
@@ -1570,6 +1591,10 @@ function paragraphPropertiesForCp(paragraphProperties, paragraphRanges, cpStart)
 
 function tableCellParagraphToXml(paragraph, properties, characterProperties, fontTable, suppressBold = false, documentOptions = {}) {
   const paragraphMarkProperties = characterProperties[paragraph.cpEnd - 1] ?? characterProperties[paragraph.cpStart + paragraph.text.length] ?? null;
+  const paragraphSection = documentOptions.sections
+    ?.find((section) => paragraph.cpStart >= section.cpStart && paragraph.cpStart < section.cpEnd)
+    ?.properties ?? null;
+  const paragraphOptions = withParagraphSectionOptions(documentOptions, paragraphSection);
   const suppressTableCellDefaults = shouldSuppressTableCellDefaults(properties, paragraphMarkProperties);
   const pPrXml = buildTableCellParagraphPropertiesXml(
     properties,
@@ -1577,10 +1602,10 @@ function tableCellParagraphToXml(paragraph, properties, characterProperties, fon
     fontTable,
     paragraph.text,
     suppressBold,
-    documentOptions,
+    paragraphOptions,
   );
   const pid = nextParaId();
-  const bookmarkEvents = buildBookmarkEventsForParagraph(documentOptions.bookmarks ?? [], paragraph);
+  const bookmarkEvents = buildBookmarkEventsForParagraph(paragraphOptions.bookmarks ?? [], paragraph);
 
   if (!paragraph.text || paragraph.text.length === 0) {
     return `        <w:p w14:paraId="${pid}">\n${pPrXml}${bookmarkTagsAtCp(bookmarkEvents, paragraph.cpStart)}        </w:p>\n`;
@@ -1598,14 +1623,14 @@ function tableCellParagraphToXml(paragraph, properties, characterProperties, fon
       emitDefaultHighlight: suppressBold,
       emitComplexScriptSize: suppressBold,
       emitExplicitComplexScriptSize: true,
-      emitUnderlineHighlight: !documentOptions.lineGridWithoutHeaderSubdocument && documentOptions.emitUnderlineHighlight !== false,
-	    suppressComplexScriptSize: documentOptions.suppressComplexScriptSize,
-	    suppressComplexScriptToggles: documentOptions.lineGridWithoutHeaderSubdocument || documentOptions.suppressNegativeGridInlineComplexScriptToggles === true,
-      emitExtendedCharacterToggles: documentOptions.emitExtendedCharacterToggles === true,
+      emitUnderlineHighlight: !paragraphOptions.lineGridWithoutHeaderSubdocument && paragraphOptions.emitUnderlineHighlight !== false,
+	    suppressComplexScriptSize: paragraphOptions.suppressComplexScriptSize,
+	    suppressComplexScriptToggles: paragraphOptions.lineGridWithoutHeaderSubdocument || paragraphOptions.suppressNegativeGridInlineComplexScriptToggles === true,
+      emitExtendedCharacterToggles: paragraphOptions.emitExtendedCharacterToggles === true,
 	    suppressDefaultRunFonts: suppressTableCellDefaults,
     },
     bookmarkEvents,
-    documentOptions,
+    paragraphOptions,
   );
   return `        <w:p w14:paraId="${pid}">\n${pPrXml}          ${runs}\n        </w:p>\n`;
 }
@@ -1729,7 +1754,10 @@ function cleanParagraphText(text) {
   // for rendering as <w:br w:type="textWrapping"/> in buildRuns.
   // MS-DOC-SPEC/19: 0x13 (field begin), 0x14 (field separator), 0x15 (field
   // end) are field characters — preserve them for fldChar/instrText emission.
-  return text.replace(/[\x00-\x06\x08\x0d\x0f-\x12\x16-\x1f]/g, "");
+  // MS-DOC-SPEC/15 PlcfSpa anchors are represented in the text stream by
+  // anchor characters at their CPs; keep 0x08 so buildRuns can emit the
+  // corresponding parsed Spa object without shifting later CPs.
+  return text.replace(/[\x00-\x06\x0d\x0f-\x12\x16-\x1f]/g, "");
 }
 
 function paragraphToXml(paragraph, properties, characterProperties, fontTable, charIdx, sectionProperties = null, spacingSectionProperties = sectionProperties, sectionIndex = -1, paraId = null, documentOptions = {}) {
@@ -1793,29 +1821,38 @@ function buildBookmarkEventsForParagraph(bookmarks, paragraph) {
   const bodyTextLength = paragraph.bodyTextLength ?? null;
   for (const bookmark of bookmarks) {
     const isCollapsed = bookmark.cpStart === bookmark.cpEnd;
+    const isEmptyParagraph = textStart === textEnd;
     const isFinalZeroLengthAtParagraphEnd = bookmark.cpStart === bookmark.cpEnd
       && bookmark.cpStart === paragraphEnd
       && paragraphEnd === bodyTextLength;
     const isZeroLengthAtEmptyParagraphStart = bookmark.cpStart === bookmark.cpEnd
       && bookmark.cpStart === textStart
       && textStart === textEnd;
+    const startsAtEmptyParagraphBoundary = !isCollapsed
+      && bookmark.cpStart === textStart
+      && isEmptyParagraph;
+    const endsAtEmptyParagraphBoundary = !isCollapsed
+      && bookmark.cpEnd === paragraphEnd
+      && isEmptyParagraph;
     if (isCollapsed && ((bookmark.cpStart >= textStart && bookmark.cpStart <= textEnd) || isFinalZeroLengthAtParagraphEnd || isZeroLengthAtEmptyParagraphStart)) {
       const tags = events.collapsed.get(bookmark.cpStart) ?? [];
       tags.push(bookmarkPairXml(bookmark));
       events.collapsed.set(Math.min(bookmark.cpStart, textEnd), sortBookmarkTags(tags));
       continue;
     }
-    if ((bookmark.cpStart >= textStart && bookmark.cpStart < textEnd) || isFinalZeroLengthAtParagraphEnd || isZeroLengthAtEmptyParagraphStart) {
+    if ((bookmark.cpStart >= textStart && bookmark.cpStart < textEnd) || isFinalZeroLengthAtParagraphEnd || isZeroLengthAtEmptyParagraphStart || startsAtEmptyParagraphBoundary) {
       const tags = events.starts.get(bookmark.cpStart) ?? [];
       tags.push(`<w:bookmarkStart w:id="${bookmark.id}" w:name="${escapeXml(bookmark.name)}"/>`);
       events.starts.set(Math.min(bookmark.cpStart, textEnd), tags);
     }
-    if ((bookmark.cpEnd >= textStart && bookmark.cpEnd <= textEnd) || isFinalZeroLengthAtParagraphEnd || isZeroLengthAtEmptyParagraphStart) {
+    if ((bookmark.cpEnd >= textStart && bookmark.cpEnd <= textEnd) || isFinalZeroLengthAtParagraphEnd || isZeroLengthAtEmptyParagraphStart || endsAtEmptyParagraphBoundary) {
       // MS-DOC-SPEC/18 Plcfbkf/Plcfbkl stores a limit CP, which can be equal
       // to the start CP or land on the paragraph mark. The paragraph mark is
       // not emitted as text here; delimiter-boundary CPs belong to the next
       // insertion point unless this is the final body boundary.
-      const endCp = Math.min(bookmark.cpEnd, textEnd);
+      const endCp = endsAtEmptyParagraphBoundary && paragraph.manualPageBreak
+        ? paragraphEnd
+        : Math.min(bookmark.cpEnd, textEnd);
       const tags = events.ends.get(endCp) ?? [];
       tags.push(`<w:bookmarkEnd w:id="${bookmark.id}"/>`);
       events.ends.set(endCp, tags);
@@ -1858,6 +1895,17 @@ function buildRuns(paragraph, characterProperties, fontTable, charIdx, paragraph
     }
     if (part === "\x07") {
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      currentCharIdx += 1;
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      continue;
+    }
+    if (part === "\x08") {
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      const shape = findShapeAnchorAtCp(documentOptions.shapeAnchors, currentCharIdx);
+      if (shape) {
+        const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
+        runs.push(`<w:r>${rPr}${buildLineShapeAnchorXml(shape)}</w:r>`);
+      }
       currentCharIdx += 1;
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       continue;
@@ -1934,6 +1982,163 @@ function buildRuns(paragraph, characterProperties, fontTable, charIdx, paragraph
   return runs.join("");
 }
 
+function findShapeAnchorAtCp(shapeAnchors = [], cp) {
+  return shapeAnchors.find((shape) => shape.cpStart === cp) ?? null;
+}
+
+function buildLineShapeAnchorXml(shape) {
+  const widthTwips = Math.abs(shape.xaRight - shape.xaLeft);
+  const heightTwips = Math.abs(shape.yaBottom - shape.yaTop);
+  if (heightTwips !== 0) {
+    throw new Error("Unimplemented PlcfSpa shape export: non-horizontal line shape");
+  }
+  if (shape.bx !== 2 || shape.by !== 2 || shape.wr !== 3) {
+    throw new Error(`Unimplemented PlcfSpa shape export: bx=${shape.bx} by=${shape.by} wr=${shape.wr}`);
+  }
+
+  const cx = twipsToEmu(widthTwips);
+  const cy = twipsToEmu(heightTwips);
+  const x = twipsToEmu(shape.xaLeft);
+  const y = twipsToEmu(shape.yaTop);
+  const officeArt = shape.officeArt;
+  if (!officeArt) {
+    throw new Error(`Invalid WPS document: missing OfficeArt shape data for Spa.lid ${shape.lid}`);
+  }
+  if (!Number.isInteger(officeArt.relativeHeight) || !Number.isInteger(officeArt.docPrId) || !officeArt.name || !officeArt.gfxData) {
+    throw new Error(`Invalid WPS document: incomplete OfficeArt shape data for Spa.lid ${shape.lid}`);
+  }
+  const relativeHeight = officeArt.relativeHeight;
+  const docPrId = officeArt.docPrId;
+  const docPrName = escapeXml(officeArt.name);
+  const fallbackSpid = officeArt.fallbackSpid ?? officeArt.spid;
+  const gfxData = formatGfxData(officeArt.gfxData);
+  const vmlStyle = `position:absolute;left:0pt;margin-left:${formatPoints(shape.xaLeft)}pt;margin-top:${formatPoints(shape.yaTop)}pt;height:0pt;width:${formatPoints(widthTwips)}pt;z-index:${relativeHeight};mso-width-relative:page;mso-height-relative:page;`;
+  return `<mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="${relativeHeight}" behindDoc="${shape.fBelowText ? 1 : 0}" locked="${shape.fAnchorLock ? 1 : 0}" layoutInCell="0" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>${x}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>${y}</wp:posOffset></wp:positionV><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="6350" r="0" b="6350"/><wp:wrapNone/><wp:docPr id="${docPrId}" name="${docPrName}"/><wp:cNvGraphicFramePr/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvCnPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="9525" cap="flat" cmpd="sng"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:prstDash val="solid"/><a:headEnd type="none" w="med" len="med"/><a:tailEnd type="none" w="med" len="med"/></a:ln><a:effectLst/></wps:spPr><wps:bodyPr upright="1"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:line id="_x0000_s${fallbackSpid}" o:spid="_x0000_s${fallbackSpid}" o:spt="20" style="${vmlStyle}" filled="f" stroked="t" coordsize="21600,21600" o:allowincell="f" o:gfxdata="${gfxData}"><v:fill on="f" focussize="0,0"/><v:stroke color="#000000" joinstyle="round"/><v:imagedata o:title=""/><o:lock v:ext="edit" aspectratio="f"/></v:line></w:pict></mc:Fallback></mc:AlternateContent>`;
+}
+
+function twipsToEmu(twips) {
+  return Math.round(twips * 635);
+}
+
+function formatGfxData(buffer) {
+  const base64 = normalizeOfficeArtGfxData(buffer).toString("base64");
+  const chunks = [];
+  for (let i = 0; i < base64.length; i += 76) {
+    chunks.push(base64.slice(i, i + 76));
+  }
+  return `${chunks.join("&#10;")}&#10;`;
+}
+
+function normalizeOfficeArtGfxData(buffer) {
+  const zip = Buffer.from(buffer);
+  const entries = parseZipLocalEntries(zip);
+  const e2oDoc = entries.find((entry) => entry.name === "drs/e2oDoc.xml");
+  if (!e2oDoc || e2oDoc.method !== 8) return zip;
+
+  const xml = inflateRawSync(e2oDoc.data).toString("utf8");
+  if (xml.includes("<a:effectLst/>") || !xml.includes("</a:ln></wps:spPr>")) return zip;
+
+  // The source OfficeArt tertiary FOPT stores the e2o package, while WPS'
+  // DOCX export writes the same DrawingML shape properties used in the main
+  // anchor. No effect properties are present in the OfficeArt data, so WPS
+  // serializes an empty a:effectLst in both places.
+  const updatedXml = Buffer.from(xml.replace("</a:ln></wps:spPr>", "</a:ln><a:effectLst/></wps:spPr>"), "utf8");
+  e2oDoc.data = deflateRawSync(updatedXml, { level: 1 });
+  e2oDoc.uncompressedSize = updatedXml.length;
+  e2oDoc.compressedSize = e2oDoc.data.length;
+  e2oDoc.crc = crc32(updatedXml);
+  return rebuildZipWithUpdatedEntries(zip, entries);
+}
+
+function parseZipLocalEntries(zip) {
+  const entries = [];
+  let off = 0;
+  while (off + 30 <= zip.length && zip.readUInt32LE(off) === 0x04034b50) {
+    const nameLength = zip.readUInt16LE(off + 26);
+    const extraLength = zip.readUInt16LE(off + 28);
+    const dataStart = off + 30 + nameLength + extraLength;
+    const compressedSize = zip.readUInt32LE(off + 18);
+    const dataEnd = dataStart + compressedSize;
+    if (dataEnd > zip.length) {
+      throw new Error("Invalid OfficeArt gfxdata package: local file entry exceeds package length");
+    }
+    entries.push({
+      localOffset: off,
+      localHeader: Buffer.from(zip.subarray(off, dataStart)),
+      name: zip.subarray(off + 30, off + 30 + nameLength).toString("utf8"),
+      method: zip.readUInt16LE(off + 8),
+      compressedSize,
+      uncompressedSize: zip.readUInt32LE(off + 22),
+      crc: zip.readUInt32LE(off + 14),
+      data: Buffer.from(zip.subarray(dataStart, dataEnd)),
+    });
+    off = dataEnd;
+  }
+  return entries;
+}
+
+function rebuildZipWithUpdatedEntries(originalZip, entries) {
+  const eocdOffset = findZipEndOfCentralDirectory(originalZip);
+  const centralOffset = entries.reduce(
+    (maxEnd, entry) => Math.max(maxEnd, entry.localOffset + entry.localHeader.length + entry.compressedSize),
+    0,
+  );
+  const centralEnd = eocdOffset;
+  const entryByName = new Map(entries.map((entry) => [entry.name, entry]));
+  const rebuilt = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const localHeader = Buffer.from(entry.localHeader);
+    localHeader.writeUInt32LE(entry.crc, 14);
+    localHeader.writeUInt32LE(entry.compressedSize, 18);
+    localHeader.writeUInt32LE(entry.uncompressedSize, 22);
+    entry.newLocalOffset = offset;
+    rebuilt.push(localHeader, entry.data);
+    offset += localHeader.length + entry.data.length;
+  }
+
+  const centralRecords = [];
+  let centralCursor = centralOffset;
+  while (centralCursor < centralEnd) {
+    if (originalZip.readUInt32LE(centralCursor) !== 0x02014b50) {
+      throw new Error("Invalid OfficeArt gfxdata package: malformed central directory");
+    }
+    const nameLength = originalZip.readUInt16LE(centralCursor + 28);
+    const extraLength = originalZip.readUInt16LE(centralCursor + 30);
+    const commentLength = originalZip.readUInt16LE(centralCursor + 32);
+    const recordEnd = centralCursor + 46 + nameLength + extraLength + commentLength;
+    const record = Buffer.from(originalZip.subarray(centralCursor, recordEnd));
+    const name = record.subarray(46, 46 + nameLength).toString("utf8");
+    const entry = entryByName.get(name);
+    if (entry) {
+      record.writeUInt32LE(entry.crc, 16);
+      record.writeUInt32LE(entry.compressedSize, 20);
+      record.writeUInt32LE(entry.uncompressedSize, 24);
+      record.writeUInt32LE(entry.newLocalOffset, 42);
+    }
+    centralRecords.push(record);
+    centralCursor = recordEnd;
+  }
+
+  const centralDirectory = Buffer.concat(centralRecords);
+  const eocd = Buffer.from(originalZip.subarray(eocdOffset));
+  eocd.writeUInt32LE(centralDirectory.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...rebuilt, centralDirectory, eocd]);
+}
+
+function findZipEndOfCentralDirectory(zip) {
+  for (let off = zip.length - 22; off >= 0; off -= 1) {
+    if (zip.readUInt32LE(off) === 0x06054b50) return off;
+  }
+  throw new Error("Invalid OfficeArt gfxdata package: missing end of central directory");
+}
+
+function formatPoints(twips) {
+  const value = twips / 20;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0$/, "");
+}
+
 function bookmarkTagsAtCp(bookmarkEvents, cp) {
   if (!bookmarkEvents) return "";
   const collapsed = bookmarkEvents.collapsed?.get(cp) ?? [];
@@ -1950,8 +2155,9 @@ function splitTabsAndMarks(value) {
   let start = 0;
   for (let i = 0; i < value.length; i += 1) {
     // MS-DOC-SPEC/19: split on tabs, cell/para/section marks, line/col breaks,
-    // and field chars (0x13 begin, 0x14 separator, 0x15 end)
-    if (value[i] === "\t" || value[i] === "\x07" || value[i] === "\x0b" || value[i] === "\x0c" || value[i] === "\x0e" || value[i] === "\x13" || value[i] === "\x14" || value[i] === "\x15") {
+    // and field chars (0x13 begin, 0x14 separator, 0x15 end). 0x08 is a
+    // shape-anchor character whose metadata comes from MS-DOC PlcfSpa.
+    if (value[i] === "\t" || value[i] === "\x07" || value[i] === "\x08" || value[i] === "\x0b" || value[i] === "\x0c" || value[i] === "\x0e" || value[i] === "\x13" || value[i] === "\x14" || value[i] === "\x15") {
       if (i > start) {
         parts.push(value.slice(start, i));
       }
@@ -2094,7 +2300,9 @@ function runPropertiesKey(props, fontTable) {
     resolveFontName(fontTable, props.fontHAnsi ?? props.fontId),
     resolveFontName(fontTable, props.fontCs ?? props.fontId),
     props.bold === true ? 1 : props.bold === false ? 0 : "",
+    props.boldCs === true ? 1 : props.boldCs === false ? 0 : "",
     props.italic === true ? 1 : props.italic === false ? 0 : "",
+    props.italicCs === true ? 1 : props.italicCs === false ? 0 : "",
     props.underline ? 1 : 0,
     props.underlineStyle ?? "",
     props.underlineColor ?? "",
@@ -2110,6 +2318,11 @@ function runPropertiesKey(props, fontTable) {
     props.charSnapToGrid === true ? 1 : props.charSnapToGrid === false ? 0 : "",
     props.rtl === true ? 1 : props.rtl === false ? 0 : "",
     props.complexScript === true ? 1 : props.complexScript === false ? 0 : "",
+    props.caps === true ? 1 : props.caps === false ? 0 : "",
+    props.smallCaps === true ? 1 : props.smallCaps === false ? 0 : "",
+    props.strike === true ? 1 : props.strike === false ? 0 : "",
+    props.dstrike === true ? 1 : props.dstrike === false ? 0 : "",
+    props.vanish === true ? 1 : props.vanish === false ? 0 : "",
     props.emphasisMark ?? "",
     props.textEffect ?? "",
     props.fitText?.width ?? "",
@@ -2201,10 +2414,12 @@ function buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults, emi
 
 	  if (props.bold === true) {
 	    parts.push(`<w:b/>`);
-	    if (props.boldCs == null && !suppressComplexScriptToggles && (hasComplexScriptFont || forceComplexScriptBoldToggle)) parts.push(`<w:bCs/>`);
+	    // MS-DOC-SPEC/16 keeps sprmCFBold (Latin/East Asian bold) separate
+	    // from sprmCFBoldBi (complex-script bold). Do not infer bCs from ftcBi.
+	    if (props.boldCs == null && !suppressComplexScriptToggles && forceComplexScriptBoldToggle) parts.push(`<w:bCs/>`);
 	  } else if (props.bold === false || suppressBold) {
 	    parts.push(`<w:b w:val="0"/>`);
-	    if (props.boldCs == null && !suppressComplexScriptToggles && (hasComplexScriptFont || forceComplexScriptBoldToggle)) {
+	    if (props.boldCs == null && !suppressComplexScriptToggles && forceComplexScriptBoldToggle) {
 	      parts.push((suppressComplexScriptSize || forceComplexScriptBoldToggle) ? `<w:bCs w:val="0"/>` : `<w:bCs/>`);
 	    }
 	  }
@@ -2255,7 +2470,9 @@ function buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults, emi
     // when it differs from sprmCHps, WPS exports it as w:szCs even without a
     // separate complex-script font.
     parts.push(`<w:szCs w:val="${props.fontSizeCs}"/>`);
-  } else if (!suppressComplexScriptSize && props.fontSize != null && (hasComplexScriptFont || emitComplexScriptSize || props.background != null)) {
+  } else if (!suppressComplexScriptSize && props.fontSize != null && (emitComplexScriptSize || props.background != null)) {
+    // MS-DOC-SPEC/16 keeps sprmCHps (font size) separate from sprmCHpsBi
+    // (complex-script font size). Do not infer szCs from ftcBi alone.
     parts.push(`<w:szCs w:val="${props.fontSize}"/>`);
   }
 
@@ -2446,6 +2663,11 @@ function buildParagraphPropertiesXml(properties, paragraphMarkProperties = null,
   }
   if (properties?.textAlignment) {
     parts.push(`<w:textAlignment w:val="${properties.textAlignment}"/>`);
+  }
+  if (properties?.outlineLevel != null) {
+    // MS-DOC-SPEC/16 sprmPOutLvl stores the direct paragraph outline level;
+    // WPS serializes that parsed direct PAPX property into OOXML pPr.
+    parts.push(`<w:outlineLvl w:val="${properties.outlineLevel}"/>`);
   }
 
 		  const paragraphRunProperties = buildRunPropertiesXmlFromProps(paragraphMarkProperties, fontTable, {

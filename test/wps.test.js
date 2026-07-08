@@ -244,6 +244,34 @@ test("settings shape defaults are emitted from parsed MS-DOC PlcfSpa FIB slots",
   const sample9Expected = readZipEntry(await readFile("sample/sample9/expected.docx"), "word/settings.xml").toString("utf8");
   assert.equal(extractSettingsNode(sample9Settings, "w:hdrShapeDefaults"), extractSettingsNode(sample9Expected, "w:hdrShapeDefaults"));
   assert.equal(extractSettingsNode(sample9Settings, "w:shapeDefaults"), null);
+  assert.equal(extractSettingsNode(sample8Settings, "w:zoom"), extractSettingsNode(sample8Expected, "w:zoom"));
+  assert.equal(extractSettingsNode(sample9Settings, "w:zoom"), extractSettingsNode(sample9Expected, "w:zoom"));
+
+  const sample10Settings = readZipEntry(wpsToDocxBuffer(sample10, { title: "sample10" }), "word/settings.xml").toString("utf8");
+  const sample10Expected = readZipEntry(await readFile("sample/sample10/expected.docx"), "word/settings.xml").toString("utf8");
+  assert.equal(extractSettingsNode(sample10Settings, "w:zoom"), extractSettingsNode(sample10Expected, "w:zoom"));
+});
+
+test("document background follows parsed grid state unless shapes or tracked revisions own visual state", async () => {
+  const sample3 = readWps(await readFile("sample/sample3/original.wps"));
+  const sample8 = readWps(await readFile(SAMPLE8_WPS));
+  const sample9 = readWps(await readFile(SAMPLE9_WPS));
+  const sample10 = readWps(await readFile(SAMPLE10_WPS));
+
+  assert.equal(sample3.sections[0].properties.docGridType, 2);
+  assert.equal(sample3.sections[0].properties.docGridCharSpace, 0);
+  assert.equal(sample3.fib.lcbPlcSpaMom, 0);
+  assert.equal(sample3.fib.lcbPlcSpaHdr, 0);
+  assert.equal(sample3.dop.fRevMarking, false);
+
+  assert.ok(sample8.fib.lcbPlcSpaMom > 0);
+  assert.ok(sample9.fib.lcbPlcSpaHdr > 0);
+  assert.equal(sample10.dop.fRevMarking, true);
+
+  assert.match(readDocxDocumentXml(wpsToDocxBuffer(sample3, { title: "sample3" })), /<w:background w:color="FFFFFF"\/>/);
+  assert.doesNotMatch(readDocxDocumentXml(wpsToDocxBuffer(sample8, { title: "sample8" })), /<w:background/);
+  assert.doesNotMatch(readDocxDocumentXml(wpsToDocxBuffer(sample9, { title: "sample9" })), /<w:background/);
+  assert.doesNotMatch(readDocxDocumentXml(wpsToDocxBuffer(sample10, { title: "sample10" })), /<w:background/);
 });
 
 test("sample3 settings use the 420 default tab stop from parsed document settings", async () => {
@@ -419,6 +447,46 @@ test("Selsf selection within the MS-DOC section extent emits a _GoBack bookmark"
 
   const xml = readDocxDocumentXml(wpsToDocxBuffer(sample9, { title: "sample9" }));
   assert.match(xml, /w:name="_GoBack"/);
+});
+
+test("standard bookmarks parse MS-DOC FBKF ibkl and BKC fields", async () => {
+  const sample8 = readWps(await readFile(SAMPLE8_WPS));
+  assert.equal(sample8.bookmarks.length, 51);
+  assert.deepEqual(sample8.bookmarks[0], {
+    id: 0,
+    name: "_Toc253401763",
+    cpStart: 846,
+    cpEnd: 855,
+    bkc: 0,
+  });
+  assert.deepEqual(sample8.bookmarks[6], {
+    id: 6,
+    name: "_Toc253402278",
+    cpStart: 846,
+    cpEnd: 855,
+    bkc: 0,
+  });
+  assert.deepEqual(sample8.bookmarks[33], {
+    id: 33,
+    name: "_Toc317491733",
+    cpStart: 6822,
+    cpEnd: 7138,
+    bkc: 0,
+  });
+
+  const xml = readDocxDocumentXml(wpsToDocxBuffer(sample8, { title: "sample8" }));
+  assert.match(xml, /<w:bookmarkStart w:id="33" w:name="_Toc317491733"\/>/);
+  assert.match(xml, /<w:bookmarkStart w:id="34" w:name="_Toc317331300"\/>/);
+  assert.match(xml, /<w:bookmarkEnd w:id="43"\/><w:bookmarkEnd w:id="44"\/>/);
+});
+
+test("direct paragraph outline level is preserved from sprmPOutLvl", async () => {
+  const sample9 = readWps(await readFile(SAMPLE9_WPS));
+  assert.deepEqual(sample9.paragraphProperties.slice(0, 3).map((props) => props.outlineLevel), [9, 9, 9]);
+  assert.equal(sample9.paragraphProperties[3].outlineLevel, null);
+
+  const xml = readDocxDocumentXml(wpsToDocxBuffer(sample9, { title: "sample9" }));
+  assert.equal((xml.match(/<w:outlineLvl w:val="9"\/>/g) ?? []).length, 3);
 });
 
 test("compact header subdocuments emit MS-DOC default/even header-footer references", async () => {
@@ -933,6 +1001,66 @@ test("MS-DOC NilBrc cell borders are preserved as explicit OOXML nil borders", a
   assert.match(firstCellBorders, /<w:bottom w:val="single" w:color="auto" w:sz="4" w:space="0"\/>/);
 });
 
+test("sample8 cell borders do not synthesize unparsed nil overrides", async () => {
+  const wps = readWps(await readFile(SAMPLE8_WPS));
+  const documentXml = readDocxDocumentXml(wpsToDocxBuffer(wps, { title: "sample8" }));
+  const expectedXml = readDocxDocumentXml(await readFile("sample/sample8/expected.docx"));
+
+  assert.equal(
+    (documentXml.match(/<w:tcBorders>/g) ?? []).length,
+    (expectedXml.match(/<w:tcBorders>/g) ?? []).length,
+  );
+});
+
+test("sample8 table grid and style use parsed row properties", async () => {
+  const wps = readWps(await readFile(SAMPLE8_WPS));
+  assert.equal(wps.tableRows[0].tableStyleId, "5");
+  assert.equal(wps.tableRows[1].tableStyleId, "4");
+  assert.deepEqual(wps.tableRows[1].gridCols.slice(0, 3), [1679, 8, 1177]);
+  assert.equal(wps.tableRows[1].rows[0].cells[0].gridSpan, 11);
+
+  const documentXml = readDocxDocumentXml(wpsToDocxBuffer(wps, { title: "sample8" }));
+  assert.match(documentXml, /<w:tblGrid>[\s\S]*?<w:gridCol w:w="1679"\/>[\s\S]*?<w:gridCol w:w="8"\/>[\s\S]*?<w:gridCol w:w="1177"\/>/);
+  assert.match(documentXml, /<w:gridSpan w:val="11"\/>/);
+});
+
+test("sample8 PlcfSpa line shape anchors are parsed and emitted at anchor characters", async () => {
+  const wps = readWps(await readFile(SAMPLE8_WPS));
+  assert.equal(wps.shapeAnchors.length, 6);
+  assert.equal(wps.fib.fcDggInfo, 6822);
+  assert.equal(wps.fib.lcbDggInfo, 11985);
+  assert.deepEqual(
+    wps.shapeAnchors.slice(0, 3).map((shape) => ({
+      cpStart: shape.cpStart,
+      lid: shape.lid,
+      xaLeft: shape.xaLeft,
+      yaTop: shape.yaTop,
+      xaRight: shape.xaRight,
+      yaBottom: shape.yaBottom,
+      bx: shape.bx,
+      by: shape.by,
+      wr: shape.wr,
+      officeArtSpid: shape.officeArt?.spid,
+      docPrId: shape.officeArt?.docPrId,
+      relativeHeight: shape.officeArt?.relativeHeight,
+      hasGfxData: Buffer.isBuffer(shape.officeArt?.gfxData),
+    })),
+    [
+      { cpStart: 6159, lid: 1026, xaLeft: 8815, yaTop: 3588, xaRight: 8816, yaBottom: 3588, bx: 2, by: 2, wr: 3, officeArtSpid: 1026, docPrId: 54, relativeHeight: 251663360, hasGfxData: true },
+      { cpStart: 6160, lid: 1027, xaLeft: 8815, yaTop: 2964, xaRight: 8816, yaBottom: 2964, bx: 2, by: 2, wr: 3, officeArtSpid: 1027, docPrId: 55, relativeHeight: 251662336, hasGfxData: true },
+      { cpStart: 6161, lid: 1028, xaLeft: 8815, yaTop: 1418, xaRight: 8816, yaBottom: 1418, bx: 2, by: 2, wr: 3, officeArtSpid: 1028, docPrId: 56, relativeHeight: 251664384, hasGfxData: true },
+    ],
+  );
+  assert.equal(wps.shapeAnchors[0].officeArt.gfxData.subarray(0, 4).toString("latin1"), "PK\u0003\u0004");
+
+  const documentXml = readDocxDocumentXml(wpsToDocxBuffer(wps, { title: "sample8" }));
+  assert.equal((documentXml.match(/<mc:AlternateContent>/g) ?? []).length, 6);
+  assert.match(documentXml, /<wp:posOffset>5597525<\/wp:posOffset>/);
+  assert.match(documentXml, /<wp:posOffset>2278380<\/wp:posOffset>/);
+  assert.match(documentXml, /<wp:docPr id="54" name="直接连接符 54"\/>/);
+  assert.match(documentXml, /o:gfxdata="UEsDBAo/);
+});
+
 test("percentage table width emits cell widths from parsed grid proportions", () => {
   const noBorder = { style: "none", width: 0, color: "auto", space: 0 };
   const docx = wpsToDocxBuffer({
@@ -978,6 +1106,23 @@ test("percentage table width emits cell widths from parsed grid proportions", ()
 
   assert.match(xml, /<w:tcW w:w="3750" w:type="pct"\/>/);
   assert.match(xml, /<w:tcW w:w="1250" w:type="pct"\/>/);
+});
+
+test("sample9 table cells use parsed sprmTCellWidth preferred pct widths", async () => {
+  const wps = readWps(await readFile(SAMPLE9_WPS));
+  const row = wps.tableRows[0].rows.find((candidate) => candidate.cells.length === 3);
+  assert.deepEqual(
+    row.cells.map((cell) => cell.preferredWidth),
+    [
+      { type: "pct", value: 527 },
+      { type: "pct", value: 2628 },
+      { type: "pct", value: 1844 },
+    ],
+  );
+
+  const xml = readDocxDocumentXml(wpsToDocxBuffer(wps, { title: "sample9" }));
+  assert.match(xml, /<w:tcW w:w="1844" w:type="pct"\/>/);
+  assert.doesNotMatch(xml, /<w:tcW w:w="1845" w:type="pct"\/>/);
 });
 
 test("table indent from parsed rgdxaCenter margin edge does not synthesize justification", () => {
@@ -1630,6 +1775,33 @@ test("emits explicit MS-DOC complex-script bold independently of derived toggles
   const xml = readDocxDocumentXml(docx);
 
   assert.match(xml, /<w:b\/><w:bCs\/>/);
+});
+
+test("run coalescing preserves explicit MS-DOC complex-script bold boundaries", () => {
+  const docx = wpsToDocxBuffer({
+    bodyText: "AB\r",
+    defaultTabStop: 720,
+    characterProperties: [
+      { fontSize: 18, fontSizeCs: 18 },
+      { fontSize: 18, fontSizeCs: 18, boldCs: true },
+    ],
+    sections: [{
+      cpStart: 0,
+      cpEnd: 3,
+      properties: { docGridType: 2, docGridLinePitch: 312 },
+    }],
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      grfFmtFilter: 0x5024,
+      typography: { fKerningPunct: true, iJustification: 0 },
+      compatibility: { ulTrailSpace: true },
+      xmlValidation: { fValidateXML: true, fShowXMLErrors: true },
+    },
+  }, { title: "complex-script-bold-boundary" });
+  const xml = readDocxDocumentXml(docx);
+
+  assert.match(xml, /<w:t>A<\/w:t><\/w:r><w:r><w:rPr>[\s\S]*?<w:bCs\/>[\s\S]*?<\/w:rPr><w:t>B<\/w:t>/);
 });
 
 test("parses MS-DOC revision author string table", () => {

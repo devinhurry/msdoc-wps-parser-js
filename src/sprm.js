@@ -386,6 +386,10 @@ function applySprm(props, sprm, val, size) {
       break;
     case 0x4457:
       props.firstLineIndentChars = val.readInt16LE(0);
+      // MS-DOC-SPEC/16 sprmPDxcLeft1 stores the first-line indent in
+      // hundredths of character units. Preserve the SPRM id as parsed
+      // evidence so DOCX emission can avoid inferred source attribution.
+      props.firstLineIndentCharsSprm = sprm;
       break;
     case 0x4458:
       // MS-DOC-SPEC/16 sprmPDylBefore is already in 1/100 line units.
@@ -399,6 +403,10 @@ function applySprm(props, sprm, val, size) {
     case 0x8458:
     case 0x8460:
       props.firstLineIndent = val.readInt16LE(0);
+      // MS-DOC-SPEC/16 has multiple twip first-line indent SPRMs
+      // (sprmPDxaLeft180, sprmPDxaLeft1). Preserve the winning SPRM id
+      // from the parsed grpprl order instead of guessing the source later.
+      props.firstLineIndentSprm = sprm;
       break;
     case 0x2400:
       props.spacingBefore = val.readInt32LE(0);

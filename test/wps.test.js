@@ -59,6 +59,7 @@ const TABLE6_DOCX = "sample/table6/expected.docx";
 const SAMPLE8_WPS = "sample/sample8/original.wps";
 const SAMPLE9_WPS = "sample/sample9/original.wps";
 const SAMPLE10_WPS = "sample/sample10/original.wps";
+const SAMPLE11_WPS = "sample/sample11/original.wps";
 
 function buildUnicodeSttbNoExtra(strings) {
   const parts = [];
@@ -112,6 +113,68 @@ test("extracts the same readable text as the one-page DOCX export", async () => 
   const docxText = readDocxMainText(await readFile(BASIC_DOCX));
 
   assert.equal(normalizeComparableText(wps.bodyText), normalizeComparableText(docxText));
+});
+
+
+test("sample11 non-complex Unicode text excludes parsed FKP pages", async () => {
+  const wps = readWps(await readFile(SAMPLE11_WPS));
+
+  assert.equal(wps.fib.fComplex, false);
+  assert.equal(wps.fib.fExtChar, true);
+  assert.deepEqual(
+    wps.pieces.map((piece) => ({ cpStart: piece.cpStart, cpEnd: piece.cpEnd, fileOffset: piece.fileOffset, nonComplex: piece.nonComplex })),
+    [
+      { cpStart: 0, cpEnd: 1278, fileOffset: 2048, nonComplex: true },
+      { cpStart: 1278, cpEnd: 2174, fileOffset: 16384, nonComplex: true },
+    ],
+  );
+  assert.equal(wps.bodyText.length, 2129);
+  assert.match(wps.bodyText, /河南省财政厅拟废止和失效的行政规范性文件目录/);
+  assert.match(wps.bodyText, /豫财非税〔2013〕30号/);
+  assert.doesNotMatch(wps.bodyText, /[ࠀ-࿿]{5}/);
+});
+
+test("sample11 non-complex table converts with parsed final-row geometry", async () => {
+  const wps = readWps(await readFile(SAMPLE11_WPS));
+
+  assert.equal(wps.tableRows.length, 1);
+  assert.equal(wps.tableRows[0].rows.length, 28);
+  assert.equal(wps.tableRows[0].tableIndent.width, 87);
+
+  const docx = wpsToDocxBuffer(wps, { title: "sample11" });
+  const xml = readDocxDocumentXml(docx);
+  const text = readDocxMainText(docx);
+
+  assert.equal((xml.match(/<w:tbl>/g) ?? []).length, 1);
+  assert.equal((xml.match(/<w:tr[ >]/g) ?? []).length, 28);
+  assert.equal((xml.match(/<w:tc>/g) ?? []).length, 140);
+  assert.match(xml, /<w:tblInd w:w="87" w:type="dxa"\/>/);
+  assert.match(text, /河南省财政厅河南省教育厅关于明确教育考试网上报名收费有关问题的通知/);
+  assert.match(text, /豫财非税〔2013〕30号/);
+});
+
+test("sample11 non-complex conversion matches WPS main XML exports", async () => {
+  const wps = readWps(await readFile(SAMPLE11_WPS));
+
+  assert.deepEqual(wps.styleSheetInfo, {
+    ftcAsci: 6,
+    ftcFE: 4,
+    ftcOther: 6,
+    ftcBi: 0,
+    nVerBuiltInNamesWhenSaved: 7,
+  });
+  assert.equal(wps.fontTable[4].preferredName, "SimSun");
+  assert.equal(wps.styles.find((style) => style?.sti === 107)?.type, "numbering");
+
+  const docx = wpsToDocxBuffer(wps, { title: "sample11" });
+  const expectedDocx = await readFile("sample/sample11/expected.docx");
+  for (const entry of ["word/document.xml", "word/styles.xml", "word/settings.xml"]) {
+    assert.equal(
+      countXmlLineEdits(readZipEntry(docx, entry).toString("utf8"), readZipEntry(expectedDocx, entry).toString("utf8")),
+      0,
+      entry,
+    );
+  }
 });
 
 test("extracts the readable text from the full WPS export", async () => {
@@ -327,6 +390,7 @@ test("sample5 settings use parsed DOP typography, grid display, and XML validati
   assert.equal(wps.dop.cpgWebOpt, 20936);
   assert.equal(wps.dop.dxaHotZ, 360);
   assert.equal(wps.dop.cConsecHypLim, 0);
+  assert.equal(wps.dop.fCharLineUnits, false);
   assert.equal(wps.dop.rncEdn, 0);
   assert.equal(wps.dop.nEdn, 1);
   assert.equal(wps.dop.epc, 3);
@@ -449,6 +513,129 @@ test("Selsf selection within the MS-DOC section extent emits a _GoBack bookmark"
   assert.match(xml, /w:name="_GoBack"/);
 });
 
+test("explicit MS-DOC character-unit indents are preserved despite stale Dop2000 fCharLineUnits", async () => {
+  const wps = readWps(await readFile(SAMPLE8_WPS));
+  const props = wps.paragraphProperties[9];
+
+  // MS-DOC-SPEC/17 Dop2000.fCharLineUnits says character-unit indents MUST
+  // NOT be in use when false, but explicit MS-DOC-SPEC/16 sprmPDxcLeft1
+  // paragraph records are more direct evidence for the affected paragraph.
+  // Preserve the paragraph SPRM instead of using a stale document-level bit
+  // to discard it.
+  assert.equal(wps.dop.fCharLineUnits, false);
+  assert.equal(props.firstLineIndentCharsSprm, 0x4457);
+  assert.equal(props.firstLineIndentChars, 100);
+
+  const xml = readDocxDocumentXml(wpsToDocxBuffer(wps, { title: "sample8-char-units" }));
+  assert.match(xml, /<w:ind w:firstLine="281" w:firstLineChars="100"\/>/);
+});
+
+test("paragraph first-line indents preserve explicit MS-DOC SPRM sources", async () => {
+  const wps = readWps(await readFile(SAMPLE8_WPS));
+  const props = wps.paragraphProperties[10];
+
+  // MS-DOC-SPEC/16 sprmPDxcLeft1 (0x4457) carries the character-unit
+  // first-line indent, while sprmPDxaLeft1 (0x8460) carries the twip
+  // companion. Preserve both parsed values and their SPRM ids instead of
+  // recomputing one from the other.
+  assert.equal(props.firstLineIndentChars, 200);
+  assert.equal(props.firstLineIndentCharsSprm, 0x4457);
+  assert.equal(props.firstLineIndent, 562);
+  assert.equal(props.firstLineIndentSprm, 0x8460);
+});
+
+test("available samples preserve first-line indent SPRM provenance", async () => {
+  for (let sample = 1; sample <= 10; sample += 1) {
+    const wps = readWps(await readFile(`sample/sample${sample}/original.wps`));
+    for (const props of wps.paragraphProperties) {
+      if (!props) continue;
+      if (props.firstLineIndentChars != null) {
+        // MS-DOC-SPEC/16 sprmPDxcLeft1 is the only parsed source for
+        // firstLineIndentChars in this converter; keep that provenance so
+        // later DOCX emission is source-driven rather than inferred.
+        assert.equal(props.firstLineIndentCharsSprm, 0x4457);
+      }
+      if (props.firstLineIndent != null && props.firstLineIndentSprm != null) {
+        assert.ok([0x8411, 0x8458, 0x8460].includes(props.firstLineIndentSprm));
+      }
+    }
+  }
+});
+
+test("line-grid character-unit first-line resolution requires parsed sprmPDxcLeft1 source", () => {
+  const base = {
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    characterProperties: [{ fontSize: 22 }, { fontSize: 22 }],
+    sections: [{
+      cpStart: 0,
+      cpEnd: 2,
+      properties: { docGridType: 2, docGridLinePitch: 312 },
+    }],
+    dop: {
+      dxaHotZ: 360,
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      typography: { fKerningPunct: false, iJustification: 1 },
+      xmlValidation: { fValidateXML: false, fShowXMLErrors: false },
+      grfFmtFilter: 0x5024,
+      compatibility: { ulTrailSpace: true },
+    },
+  };
+
+  const sourcedXml = readDocxDocumentXml(wpsToDocxBuffer({
+    ...base,
+    paragraphProperties: [{
+      firstLineIndentChars: 200,
+      firstLineIndentCharsSprm: 0x4457,
+      firstLineIndent: 642,
+      firstLineIndentSprm: 0x8460,
+    }],
+  }, { title: "sourced-char-unit-indent" }));
+  const unsourcedXml = readDocxDocumentXml(wpsToDocxBuffer({
+    ...base,
+    paragraphProperties: [{
+      firstLineIndentChars: 200,
+      firstLineIndent: 642,
+      firstLineIndentSprm: 0x8460,
+    }],
+  }, { title: "unsourced-char-unit-indent" }));
+
+  // MS-DOC-SPEC/16 sprmPDxcLeft1 (0x4457) is the parsed evidence for
+  // character-unit indentation. Without that source id, keep the explicit
+  // twip companion rather than recomputing it from font size.
+  assert.match(sourcedXml, /<w:ind w:firstLine="440" w:firstLineChars="200"\/>/);
+  assert.match(unsourcedXml, /<w:ind w:firstLine="642" w:firstLineChars="200"\/>/);
+});
+
+test("same-CP bookmark starts preserve parsed MS-DOC PLC order", () => {
+  const docx = wpsToDocxBuffer({
+    bodyText: "AB\r",
+    defaultTabStop: 720,
+    bookmarks: [
+      { id: 0, name: "Alpha", cpStart: 0, cpEnd: 1 },
+      { id: 1, name: "Beta", cpStart: 0, cpEnd: 1 },
+      { id: 2, name: "Gamma", cpStart: 0, cpEnd: 1 },
+    ],
+    paragraphProperties: [{}],
+    characterProperties: [{}, {}, {}],
+    dop: {
+      dxaHotZ: 360,
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "same-cp-bookmark-order" });
+  const xml = readDocxDocumentXml(docx);
+  const names = [...xml.matchAll(/<w:bookmarkStart[^>]*w:name="([^"]+)"/g)].map((match) => match[1]);
+
+  // MS-DOC-SPEC/15 states SttbfBkmk is parallel to Plcfbkf: the name at a
+  // given offset is associated with the Plcfbkf data element at the same
+  // offset. Duplicate start CPs do not create a new spec ordering key, so
+  // DOCX emission preserves the parsed PLC row order.
+  assert.deepEqual(names, ["Alpha", "Beta", "Gamma"]);
+});
+
 test("standard bookmarks parse MS-DOC FBKF ibkl and BKC fields", async () => {
   const sample8 = readWps(await readFile(SAMPLE8_WPS));
   assert.equal(sample8.bookmarks.length, 51);
@@ -457,22 +644,37 @@ test("standard bookmarks parse MS-DOC FBKF ibkl and BKC fields", async () => {
     name: "_Toc253401763",
     cpStart: 846,
     cpEnd: 855,
+    ibkl: 0,
     bkc: 0,
+    bkcInfo: { raw: 0, itcFirst: 0, fPub: false, itcLim: 0, fNative: false, fCol: false },
   });
   assert.deepEqual(sample8.bookmarks[6], {
     id: 6,
     name: "_Toc253402278",
     cpStart: 846,
     cpEnd: 855,
+    ibkl: 6,
     bkc: 0,
+    bkcInfo: { raw: 0, itcFirst: 0, fPub: false, itcLim: 0, fNative: false, fCol: false },
   });
   assert.deepEqual(sample8.bookmarks[33], {
     id: 33,
     name: "_Toc317491733",
     cpStart: 6822,
     cpEnd: 7138,
+    ibkl: 34,
     bkc: 0,
+    bkcInfo: { raw: 0, itcFirst: 0, fPub: false, itcLim: 0, fNative: false, fCol: false },
   });
+  assert.equal(new Set(sample8.bookmarks.map((bookmark) => bookmark.ibkl)).size, sample8.bookmarks.length);
+  assert.ok(sample8.bookmarks.every((bookmark) => bookmark.bkcInfo.raw === bookmark.bkc));
+  assert.ok(sample8.bookmarks.every((bookmark) => bookmark.bkcInfo.fPub === false));
+  assert.ok(sample8.bookmarks.every((bookmark) => !bookmark.bkcInfo.fCol || bookmark.bkcInfo.itcFirst < bookmark.bkcInfo.itcLim));
+  assert.ok(sample8.bookmarks.every((bookmark) => bookmark.cpStart <= bookmark.cpEnd));
+  assert.deepEqual(
+    sample8.bookmarks.map((bookmark) => bookmark.cpStart),
+    [...sample8.bookmarks.map((bookmark) => bookmark.cpStart)].sort((a, b) => a - b),
+  );
 
   const xml = readDocxDocumentXml(wpsToDocxBuffer(sample8, { title: "sample8" }));
   assert.match(xml, /<w:bookmarkStart w:id="33" w:name="_Toc317491733"\/>/);
@@ -569,6 +771,7 @@ test("settings emit FIB read-only recommendation as writeProtection before zoom"
     defaultTabStop: 720,
     fib: { fReadOnlyRecommended: true },
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -584,11 +787,63 @@ test("settings emit FIB read-only recommendation as writeProtection before zoom"
   assert.ok(writeProtectionIndex < zoomIndex);
 });
 
+
+test("settings hyphenationZone follows parsed DopBase dxaHotZ", () => {
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    dop: {
+      dxaHotZ: 480,
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "hyphenation-zone" });
+  const xml = readZipEntry(docx, "word/settings.xml").toString("utf8");
+
+  assert.match(xml, /<w:hyphenationZone w:val="480"\/>/);
+});
+
+test("settings fail fast when parsed DopBase dxaHotZ is missing", () => {
+  assert.throws(() => wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    dop: {
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "missing-hyphenation-zone" }), /missing parsed DopBase\.dxaHotZ hyphenation zone/);
+});
+
+test("settings evenAndOddHeaders follows parsed DopBase fFacingPages only", () => {
+  const baseDoc = {
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    dop: {
+      fFacingPages: false,
+      dxaHotZ: 360,
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  };
+  const noEvenOddXml = readZipEntry(wpsToDocxBuffer(baseDoc, { title: "facing-pages-off" }), "word/settings.xml").toString("utf8");
+  const evenOddXml = readZipEntry(wpsToDocxBuffer({
+    ...baseDoc,
+    dop: { ...baseDoc.dop, fFacingPages: true },
+  }, { title: "facing-pages-on" }), "word/settings.xml").toString("utf8");
+
+  assert.equal(extractSettingsNode(noEvenOddXml, "w:evenAndOddHeaders"), null);
+  assert.match(evenOddXml, /<w:evenAndOddHeaders w:val="1"\/>/);
+});
+
 test("settings emit TrueType font embedding only from parsed DOP font flags", () => {
   const baseDoc = {
     bodyText: "A\r",
     defaultTabStop: 720,
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -881,6 +1136,7 @@ test("table cell paragraph controls are emitted only from parsed MS-DOC SPRMs", 
       }],
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -941,6 +1197,7 @@ test("parsed table cell paragraph controls are not suppressed by paragraph mark 
       }],
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -973,6 +1230,7 @@ test("paragraph shading follows parsed borders before East Asian controls", () =
     }],
     characterProperties: [{}, {}],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1097,6 +1355,7 @@ test("percentage table width emits cell widths from parsed grid proportions", ()
       }],
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1158,6 +1417,7 @@ test("table indent from parsed rgdxaCenter margin edge does not synthesize justi
       }],
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1193,6 +1453,7 @@ test("preserves parsed MS-DOC automatic text color when shading is present", () 
     }],
     sections: [{ cpStart: 0, cpEnd: 2, properties: {} }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1248,6 +1509,26 @@ test("extracts direct paragraph indents from full PAPX records", async () => {
   assert.equal(wps.paragraphProperties[10].rightIndent, 5232);
 });
 
+test("available samples expose MS-DOC PlcfSed section boundary invariants", async () => {
+  for (let sample = 1; sample <= 10; sample += 1) {
+    const wps = readWps(await readFile(`sample/sample${sample}/original.wps`));
+    const sectionCps = [
+      ...wps.sections.map((section) => section.cpStart),
+      wps.sections.at(-1)?.cpEnd,
+    ];
+
+    assert.ok(wps.sections.length > 0);
+    assert.equal(new Set(sectionCps).size, sectionCps.length);
+    assert.deepEqual(sectionCps, [...sectionCps].sort((a, b) => a - b));
+    assert.ok(sectionCps.at(-1) >= wps.bodyText.length);
+    for (let i = 0; i < wps.sections.length - 1; i += 1) {
+      // MS-DOC-SPEC/18 PlcfSed requires every non-final section text
+      // range to end with an end-of-section character (0x0C).
+      assert.equal(wps.bodyText[wps.sections[i].cpEnd - 1], "\f");
+    }
+  }
+});
+
 test("extracts section page geometry from PLCFSED/SEPX", async () => {
   const wps = readWps(await readFile(BASIC_WPS));
   assert.equal(wps.sections.length, 2);
@@ -1274,6 +1555,133 @@ test("parses variable-length section border SPRMs", () => {
       0x00, 0x00, 0x00, 0x00,
     ])),
     /Out-of-spec page border operand size 13/,
+  );
+});
+
+
+test("section pgSz orient preserves parsed MS-DOC page geometry", () => {
+  const baseDoc = {
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}],
+    characterProperties: [{}],
+    dop: {
+      dxaHotZ: 360,
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  };
+  const portraitGeometryXml = readDocxDocumentXml(wpsToDocxBuffer({
+    ...baseDoc,
+    sections: [{
+      cpStart: 0,
+      cpEnd: 2,
+      properties: {
+        pageWidth: 11906,
+        pageHeight: 16838,
+        orientation: "landscape",
+        marginTop: 1440,
+        marginRight: 1440,
+        marginBottom: 1440,
+        marginLeft: 1440,
+        headerMargin: 720,
+        footerMargin: 720,
+        gutterMargin: 0,
+      },
+    }],
+  }, { title: "portrait-geometry" }));
+  const landscapeGeometryXml = readDocxDocumentXml(wpsToDocxBuffer({
+    ...baseDoc,
+    sections: [{
+      cpStart: 0,
+      cpEnd: 2,
+      properties: {
+        pageWidth: 16838,
+        pageHeight: 11906,
+        orientation: "landscape",
+        marginTop: 1440,
+        marginRight: 1440,
+        marginBottom: 1440,
+        marginLeft: 1440,
+        headerMargin: 720,
+        footerMargin: 720,
+        gutterMargin: 0,
+      },
+    }],
+  }, { title: "landscape-geometry" }));
+
+  assert.match(portraitGeometryXml, /<w:pgSz w:w="11906" w:h="16838"\/>/);
+  assert.doesNotMatch(portraitGeometryXml, /orient="landscape"/);
+  assert.match(landscapeGeometryXml, /<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"\/>/);
+});
+
+test("validates MS-DOC section page and margin SPRM constraints", () => {
+  const valid = parseSectionSprms(Buffer.from([
+    0x1f, 0xb0, 0x82, 0x2e, // sprmSXaPage: 11906 twips
+    0x20, 0xb0, 0xc6, 0x41, // sprmSYaPage: 16838 twips
+    0x21, 0xb0, 0xa0, 0x05, // sprmSDxaLeft: 1440 twips
+    0x22, 0xb0, 0xa0, 0x05, // sprmSDxaRight: 1440 twips
+    0x23, 0x90, 0xa0, 0xfa, // sprmSDyaTop: -1376 twips fixed margin
+    0x24, 0x90, 0xa0, 0x05, // sprmSDyaBottom: 1440 twips
+  ]), { validateRequiredSectionProperties: true });
+
+  assert.equal(valid.pageWidth, 11906);
+  assert.equal(valid.pageHeight, 16838);
+  assert.equal(valid.marginLeft, 1440);
+  assert.equal(valid.marginRight, 1440);
+  assert.equal(valid.marginTop, -1376);
+  assert.equal(valid.marginBottom, 1440);
+  assert.throws(
+    () => parseSectionSprms(Buffer.from([
+      0x1f, 0xb0, 0x8f, 0x7b, // sprmSXaPage: 31631 ok, keeps fixture focused on missing margin
+      0x21, 0xb0, 0xa0, 0x05,
+      0x23, 0x90, 0xa0, 0x05,
+      0x24, 0x90, 0xa0, 0x05,
+    ]), { validateRequiredSectionProperties: true }),
+    /missing required sprmSDxaRight/,
+  );
+  assert.throws(
+    () => parseSectionSprms(Buffer.from([0x1f, 0xb0, 0x8f, 0x7c])),
+    /Out-of-spec section page width 31887/,
+  );
+  assert.throws(
+    () => parseSectionSprms(Buffer.from([0x23, 0x90, 0x52, 0x83])),
+    /Out-of-spec section top margin -31918/,
+  );
+});
+
+test("validates MS-DOC section document-grid SPRM constraints", () => {
+  const valid = parseSectionSprms(Buffer.from([
+    0x32, 0x50, 0x02, 0x00, // sprmSClm: clmLinesOnly
+    0x31, 0x90, 0x38, 0x01, // sprmSDyaLinePitch: 312 twips
+    0x30, 0x70, 0x00, 0x00, 0x00, 0x00, // sprmSDxtCharSpace: no difference from Normal style pitch
+  ]));
+
+  assert.deepEqual(valid, {
+    docGridType: 2,
+    docGridLinePitch: 312,
+    docGridCharSpace: 0,
+  });
+  assert.throws(
+    () => parseSectionSprms(Buffer.from([0x32, 0x50, 0x04, 0x00])),
+    /Out-of-spec section document grid mode 4/,
+  );
+  assert.throws(
+    () => parseSectionSprms(Buffer.from([0x32, 0x50, 0x02, 0x00])),
+    /enabled without sprmSDyaLinePitch/,
+  );
+  assert.throws(
+    () => parseSectionSprms(Buffer.from([0x31, 0x90, 0x00, 0x00])),
+    /Out-of-spec section document grid line pitch 0/,
+  );
+  assert.throws(
+    () => parseSectionSprms(Buffer.from([0x30, 0x70, 0x11, 0x03, 0x9b, 0x00])),
+    /Out-of-spec section document grid character spacing /,
+  );
+  assert.throws(
+    () => parseSectionSprms(Buffer.from([0x32])),
+    /Truncated section SPRM code at end of SEPX grpprl/,
   );
 });
 
@@ -1418,6 +1826,7 @@ test("emits parsed section gutter margin, column separator, and vertical alignme
       },
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1449,6 +1858,7 @@ test("emits parsed section gutter margin, column separator, and vertical alignme
       },
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1471,6 +1881,7 @@ test("ignores MS-DOC section page-number start when restart is disabled", () => 
       },
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1499,6 +1910,7 @@ test("emits parsed MS-DOC page-number format in line-grid sections", () => {
       },
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       typography: { fKerningPunct: false, iJustification: 1 },
@@ -1523,6 +1935,7 @@ test("emits MS-DOC non-section 0x0C as a manual page break", () => {
       properties: {},
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1543,6 +1956,7 @@ test("does not emit MS-DOC section-ending 0x0C as a manual page break", () => {
       { cpStart: 2, cpEnd: 4, properties: {} },
     ],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1627,6 +2041,7 @@ test("run properties emit parsed caps without synthesizing complex-script italic
     }, {}],
     fontTable: [{ name: "Times New Roman" }, { name: "SimSun" }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1652,6 +2067,7 @@ test("parses and emits MS-DOC character revision mark toggles", () => {
       { revisionMarkDel: true },
     ],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1718,6 +2134,7 @@ test("emits MS-DOC paragraph property revision as OOXML pPrChange", () => {
     }],
     sections: [{ cpStart: 0, cpEnd: 2, properties: {} }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1741,6 +2158,7 @@ test("emits MS-DOC paragraph-mark insertion revision inside paragraph run proper
     ],
     sections: [{ cpStart: 0, cpEnd: 2, properties: {} }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1764,6 +2182,7 @@ test("emits explicit MS-DOC complex-script bold independently of derived toggles
       properties: { docGridType: 2, docGridLinePitch: 312 },
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       grfFmtFilter: 0x5024,
@@ -1791,6 +2210,7 @@ test("run coalescing preserves explicit MS-DOC complex-script bold boundaries", 
       properties: { docGridType: 2, docGridLinePitch: 312 },
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       grfFmtFilter: 0x5024,
@@ -1838,6 +2258,7 @@ test("emits MS-DOC revision authors and DTTM metadata", () => {
       { revisionMarkDel: true, revisionDelAuthorIndex: 2, revisionDelDate: deletionDate },
     ],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1853,6 +2274,7 @@ test("emits MS-DOC revision authors and DTTM metadata", () => {
     revisionAuthors: ["Unknown", "Alice"],
     characterProperties: [{ revisionMarkIns: true, revisionAuthorIndex: 1, revisionDate: ((2024 - 1900) << 20) }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1866,6 +2288,7 @@ test("emits MS-DOC revision authors and DTTM metadata", () => {
       revisionAuthors: ["Unknown"],
       characterProperties: [{ revisionMarkIns: true, revisionAuthorIndex: 1 }],
       dop: {
+        dxaHotZ: 360,
         pageBorderIncludes: { header: false, footer: false },
         dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
         compatibility: { ulTrailSpace: true },
@@ -1880,6 +2303,7 @@ test("emits MS-DOC revision authors and DTTM metadata", () => {
       revisionAuthors: ["Unknown"],
       characterProperties: [{ revisionMarkIns: true, revisionDate: 60 }],
       dop: {
+        dxaHotZ: 360,
         pageBorderIncludes: { header: false, footer: false },
         dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
         compatibility: { ulTrailSpace: true },
@@ -1969,6 +2393,7 @@ test("emits parsed paragraph frame properties to DOCX framePr", () => {
       suppressOverlap: true,
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -1990,6 +2415,7 @@ test("emits parsed MS-DOC paragraph borders as direct pBdr", () => {
       },
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -2114,6 +2540,7 @@ test("emits MS-DOC Far East character layout as OOXML eastAsianLayout", () => {
       },
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -2134,6 +2561,7 @@ test("emits MS-DOC line-break clear only on manual line breaks", () => {
       {},
     ],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -2151,6 +2579,7 @@ test("emits MS-DOC line-break clear only on manual line breaks", () => {
         { lineBreakClear: "all" },
       ],
       dop: {
+        dxaHotZ: 360,
         pageBorderIncludes: { header: false, footer: false },
         dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
         compatibility: { ulTrailSpace: true },
@@ -2174,6 +2603,7 @@ test("emits parsed MS-DOC character effect toggles to DOCX run properties", () =
       mirrorIndents: true,
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -2235,6 +2665,7 @@ test("emits explicit MS-DOC sprmCIss normal as OOXML baseline", () => {
     bodyText: "A\r",
     defaultTabStop: 720,
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },
@@ -2451,6 +2882,7 @@ test("table rows emit trHeight only from parsed MS-DOC row-height SPRMs", () => 
       }],
     }],
     dop: {
+      dxaHotZ: 360,
       pageBorderIncludes: { header: false, footer: false },
       dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
       compatibility: { ulTrailSpace: true },

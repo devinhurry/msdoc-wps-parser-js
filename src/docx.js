@@ -4,6 +4,11 @@ import { lcidToBcp47 } from "./lcid.js";
 import { readWpsFile } from "./wps.js";
 import { STI_NAMES } from "./word-binary.js";
 
+// MS-DOC-SPEC/16 sprmSXaPage/sprmSYaPage defaults: Letter page
+// geometry, 8.5 x 11 inches = 12240 x 15840 twips.
+const MS_DOC_DEFAULT_PAGE_WIDTH = 12240;
+const MS_DOC_DEFAULT_PAGE_HEIGHT = 15840;
+
 // Counter for generating unique w14:paraId values (8 hex chars)
 let paraIdCounter = 0;
 
@@ -220,10 +225,17 @@ function buildSettingsXml(wpsDocument = {}) {
     parts.push(`<w:trackRevisions w:val="1"/>`);
   }
 
+  const hyphenationZone = dop?.dxaHotZ;
+  if (!Number.isInteger(hyphenationZone) || hyphenationZone < 0) {
+    throw new Error("Invalid WPS document: missing parsed DopBase.dxaHotZ hyphenation zone");
+  }
+
   parts.push(
     `<w:documentProtection${readOnlyEastAsianProfile ? ` w:edit="readOnly"` : ""} w:enforcement="0"/>`,
     `<w:defaultTabStop w:val="${defaultTabStop}"/>`,
-    `<w:hyphenationZone w:val="${(dop?.dxaHotZ && dop.dxaHotZ > 0) ? dop.dxaHotZ : 360}"/>`,
+    // MS-DOC-SPEC/17 DopBase.dxaHotZ maps directly to OOXML
+    // hyphenationZone. Fail above instead of synthesizing a default.
+    `<w:hyphenationZone w:val="${hyphenationZone}"/>`,
   );
 
   // MS-DOC-SPEC/17 DopBase.fAutoHyphen maps to OOXML autoHyphenation.
@@ -247,10 +259,10 @@ function buildSettingsXml(wpsDocument = {}) {
     parts.push(`<w:linkStyles w:val="1"/>`);
   }
 
-  // MS-DOC-SPEC/17 DopBase.fFacingPages maps to OOXML evenAndOddHeaders.
-  // WPS also uses this as a condition for evenAndOddHeaders emission,
-  // falling back to the docGridType heuristic when fFacingPages is absent.
-  if (dop?.fFacingPages ?? (sectionDocGridType !== 2 && !hasNegativeGridCharSpace)) {
+  // MS-DOC-SPEC/17 DopBase.fFacingPages maps directly to OOXML
+  // evenAndOddHeaders. Do not infer this setting from section/grid shape:
+  // the binary DOP bit is the source of truth.
+  if (dop?.fFacingPages) {
     parts.push(`<w:evenAndOddHeaders w:val="1"/>`);
   }
 
@@ -329,7 +341,13 @@ function buildSettingsXml(wpsDocument = {}) {
     if (hasGridType2 || hasNegativeGridCharSpace) {
       parts.push(`<w:adjustLineHeightInTable/>`);
     }
-    parts.push(`<w:useFELayout/>`);
+    // OOXML useFELayout has no direct MS-DOC DOP bit. WPS emits it for the
+    // East-Asian grid exports produced from complex (CLX-backed) Word binary
+    // documents; simple non-complex files preserve the other parsed Copts60
+    // compat flags but omit this OOXML-only compatibility switch.
+    if (wpsDocument.fib?.fComplex !== false) {
+      parts.push(`<w:useFELayout/>`);
+    }
   } else {
     parts.push(`<w:doNotLeaveBackslashAlone/>`, `<w:ulTrailSpace/>`, `<w:useFELayout/>`);
   }
@@ -367,7 +385,11 @@ function buildSettingsXml(wpsDocument = {}) {
     parts.push(buildMainShapeDefaultsXml());
   }
 
-  parts.push(`<mc:AlternateContent><mc:Choice Requires="wpsCustomData"><wpsCustomData:typoFeatureVersion val="0"/></mc:Choice></mc:AlternateContent>`);
+  // WPS typoFeatureVersion is WPS-specific, but WPS desktop exports track
+  // the parsed MS-DOC-SPEC/19 Stshif.nVerBuiltInNamesWhenSaved generation: older
+  // built-in-name tables export 0, while the newer generation (7+) exports 1.
+  const typoFeatureVersion = (wpsDocument.styleSheetInfo?.nVerBuiltInNamesWhenSaved ?? 0) >= 7 ? 1 : 0;
+  parts.push(`<mc:AlternateContent><mc:Choice Requires="wpsCustomData"><wpsCustomData:typoFeatureVersion val="${typoFeatureVersion}"/></mc:Choice></mc:AlternateContent>`);
 
   parts.push(`</w:settings>`);
   return parts.join("");
@@ -707,6 +729,19 @@ function createFooterReferencePlan(wpsDocument = {}, sections = []) {
 	        bySection: new Map([[0, { defaultFooterId: "rId3" }]]),
 	      };
 	    }
+    const headerTextboxText = wpsDocument.subdocuments?.headerTextboxes?.rawText ?? "";
+    if (sections.length === 1 && (onlySection.docGridType === 1 || onlySection.docGridType === 2) && /^[\x03\x04\x08\r]*$/.test(headerText) && headerTextboxText.includes("PAGE")) {
+      // MS-DOC-SPEC/15 FibRgLw97.ccpHdrTxbx stores the header-textbox
+      // subdocument after the header story. When PlcfHdd is absent but the
+      // only header textbox carries a PAGE field, WPS attaches that parsed
+      // header-story content as the default footer story.
+      return {
+        footerCount: 1,
+        footerRelationshipStartId: 3,
+        includeNotes: false,
+        bySection: new Map([[0, { defaultFooterId: "rId3" }]]),
+      };
+    }
     if (sections.length === 1 && (onlySection.docGridType === 1 || onlySection.docGridType === 2) && /[^\r]/.test(headerText)) {
       // MS-DOC-SPEC/13: when different even/odd headers are not enabled, the
       // odd header and odd footer stories are the default header/footer.
@@ -739,7 +774,7 @@ function createFooterReferencePlan(wpsDocument = {}, sections = []) {
   let assigned = 0;
   let activeRepeatedFooterMargin = null;
 
-  const isLandscape = (properties = {}) => (properties.pageWidth ?? 11906) > (properties.pageHeight ?? 16838);
+  const isLandscape = (properties = {}) => (properties.pageWidth ?? MS_DOC_DEFAULT_PAGE_WIDTH) > (properties.pageHeight ?? MS_DOC_DEFAULT_PAGE_HEIGHT);
   const addRefs = (sectionIndex, types) => {
     if (assigned >= footerCount) return;
     const refs = bySection.get(sectionIndex) ?? {};
@@ -839,7 +874,7 @@ function createCompactGridHeaderFooterPlan(sections = []) {
   };
   const isLandscape = (section) => {
     const props = section?.properties ?? {};
-    return (props.pageWidth ?? 11906) > (props.pageHeight ?? 16838);
+    return (props.pageWidth ?? MS_DOC_DEFAULT_PAGE_WIDTH) > (props.pageHeight ?? MS_DOC_DEFAULT_PAGE_HEIGHT);
   };
 
   for (let i = 0; i < sections.length; i += 1) {
@@ -2607,7 +2642,9 @@ function buildFontAttributes(props, fontTable) {
 }
 
 function resolveFontName(fontTable, fontId) {
-  return fontId != null && fontTable[fontId]?.name ? fontTable[fontId].name : "";
+  const font = fontId != null ? fontTable[fontId] : null;
+  if (!font?.name) return "";
+  return font.preferredName ?? font.name;
 }
 
 function buildParagraphPropertiesXml(properties, paragraphMarkProperties = null, fontTable = [], sectionProperties = null, spacingSectionProperties = sectionProperties, sectionIndex = -1, paragraphText = "", documentOptions = {}) {
@@ -2904,39 +2941,65 @@ function appendParagraphIndentXml(parts, properties, paragraphText = "", paragra
 }
 
 function resolveFirstLineIndentTwips(properties, paragraphMarkProperties = null, documentOptions = {}) {
-  if (properties?.firstLineIndentChars != null && documentOptions.resolveCharUnitIndentFromFont) {
+  if (properties?.firstLineIndentChars != null
+    && properties.firstLineIndentCharsSprm === 0x4457
+    && documentOptions.resolveCharUnitIndentFromFont) {
     if (paragraphMarkProperties?.fontSize == null) {
       throw new Error("Cannot resolve character-unit first-line indent without paragraph mark font size");
     }
     // MS-DOC-SPEC/16 sprmPDxcLeft1 is in hundredths of character units.
-    // In line-grid sections that omit sprmSClm character spacing, WPS resolves
-    // the companion OOXML twip indent from the paragraph mark half-point size.
+    // MS-DOC-SPEC/16 sprmSDxtCharSpace defines grid character pitch as a
+    // difference from the Normal style font pitch, and its default is no
+    // difference. When a line-grid section omits parsed sprmSDxtCharSpace,
+    // resolve only values explicitly sourced from sprmPDxcLeft1; otherwise
+    // keep the parsed twip SPRM instead of inferring a source.
     return Math.round((properties.firstLineIndentChars / 100) * (paragraphMarkProperties.fontSize / 2) * 20);
   }
   return properties?.firstLineIndent ?? null;
 }
 
+function sectionMarginTwip(section, key, fallback, sprmName, requireParsed) {
+  const value = section[key];
+  if (value != null) return value;
+  if (requireParsed) {
+    // MS-DOC-SPEC/16 requires these section margin SPRMs to be present
+    // because their defaults are implementation-dependent. Do not synthesize
+    // OOXML margins for parsed Word binary sections.
+    throw new Error(`Cannot emit parsed section without required ${sprmName}`);
+  }
+  return fallback;
+}
+
 function buildSectionPropertiesXml(properties = {}, { defaultFooterId, evenFooterId, firstFooterId, defaultHeaderId, evenHeaderId, firstHeaderId, final = false, sectionIndex = -1 } = {}) {
   const section = properties ?? {};
-  const pageWidth = section.pageWidth ?? 11906;
-  const pageHeight = section.pageHeight ?? 16838;
-  const marginTop = section.marginTop ?? 1440;
-  const marginRight = section.marginRight ?? 1440;
-  const marginBottom = section.marginBottom ?? 1440;
-  const marginLeft = section.marginLeft ?? 1440;
+  const pageWidth = section.pageWidth ?? MS_DOC_DEFAULT_PAGE_WIDTH;
+  const pageHeight = section.pageHeight ?? MS_DOC_DEFAULT_PAGE_HEIGHT;
+  const requireParsedMargins = section._msDocRequiredSectionPropertiesValidated === true;
+  const marginTop = sectionMarginTwip(section, "marginTop", 1440, "sprmSDyaTop", requireParsedMargins);
+  const marginRight = sectionMarginTwip(section, "marginRight", 1440, "sprmSDxaRight", requireParsedMargins);
+  const marginBottom = sectionMarginTwip(section, "marginBottom", 1440, "sprmSDyaBottom", requireParsedMargins);
+  const marginLeft = sectionMarginTwip(section, "marginLeft", 1440, "sprmSDxaLeft", requireParsedMargins);
+  // MS-DOC-SPEC/16 sprmSDyaHdrTop/sprmSDyaHdrBottom defaults are
+  // install-language-dependent; LCID 1033 and 2052 both list 720 twips.
+  // Parsed WPS documents normally provide the SPRMs, so this path is only
+  // for synthetic caller-supplied section objects.
   const headerMargin = section.headerMargin ?? 720;
   const footerMargin = section.footerMargin ?? 720;
+  // MS-DOC-SPEC/16 sprmSDzaGutter default is no gutter margin.
   const gutterMargin = section.gutterMargin ?? 0;
-  // MS-DOC-SPEC/16 sprmSBOrientation: prefer explicit orientation flag when
-  // it is unambiguous (set and agrees with the dimension heuristic). When the
-  // flag disagrees with dimensions, use the dimension heuristic to match WPS
-  // export behavior, which determines orientation from the page dimensions.
+  // MS-DOC-SPEC/16 stores page geometry independently:
+  //   sprmSXaPage/sprmSYaPage are the explicit width/height, while
+  //   sprmSBOrientation is an orientation operand. OOXML pgSz/@orient is
+  //   redundant with width/height, so preserve parsed page geometry and emit
+  //   orient="landscape" only when the parsed orientation agrees with the
+  //   parsed dimensions (or when dimensions alone are landscape).
   const orientation = section.orientation;
+  const dimensionsAreLandscape = pageWidth > pageHeight;
   const isLandscape = orientation != null
-    ? (orientation === "landscape") === (pageWidth > pageHeight)
+    ? (orientation === "landscape") === dimensionsAreLandscape
       ? orientation === "landscape"
-      : pageWidth > pageHeight
-    : pageWidth > pageHeight;
+      : dimensionsAreLandscape
+    : dimensionsAreLandscape;
   const parts = [];
 
   if (firstHeaderId) parts.push(`<w:headerReference r:id="${firstHeaderId}" w:type="first"/>`);
@@ -3263,7 +3326,7 @@ function createFontTableXml(fontTable = []) {
   const preserveParsedStyleOrder = hasCompactGridHeaderSubdocument(wpsDocument, sections);
 
 	  const styleEntries = styles
-	    .filter((s) => s !== null)
+	    .filter((s) => s !== null && s.type !== "numbering")
 	    .sort((a, b) => compareStylesForWpsExport(a, b, styles, { preserveParsedStyleOrder }))
     .map((style) => createStyleXml(style, styles, fontTable, docGridLinePitch, { hasEastAsianGrid }));
 
@@ -3275,15 +3338,20 @@ function createDocDefaultsXml(styles = [], fontTable = [], wpsDocument = {}) {
   // Default run fonts come from parsed binary formatting. For negative
   // sprmSDxtCharSpace, MS-DOC-SPEC/16 defines the grid character pitch as a
   // difference from the font specified by Normal, so use Normal's parsed font.
+  const stsh = wpsDocument.styleSheetInfo;
   const normalStyle = styles.find((style) => style?.sti === 0);
   const hasNegativeGridCharSpace = (wpsDocument.sections ?? []).some((section) => section?.properties?.docGridCharSpace < 0);
-  const asciiFontIndex = hasNegativeGridCharSpace ? normalStyle?.runProperties?.fontAscii : null;
+  const asciiFontIndex = stsh?.ftcAsci ?? (hasNegativeGridCharSpace ? normalStyle?.runProperties?.fontAscii : null);
   const ascii = asciiFontIndex != null
     ? resolveFontName(fontTable, asciiFontIndex)
     : fontTable[0]?.name ?? "Times New Roman";
   const hasEastAsianGrid = (wpsDocument.sections ?? []).some((section) => section?.properties?.docGridType === 1 || section?.properties?.docGridType === 2);
-  const eastAsia = hasEastAsianGrid ? (fontTable.find((font) => font?.name === "宋体")?.name ?? "宋体") : ascii;
-  return `<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="${escapeXml(ascii)}" w:hAnsi="${escapeXml(ascii)}" w:eastAsia="${escapeXml(eastAsia)}" w:cs="Times New Roman"/></w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>`;
+  const eastAsiaFontIndex = stsh?.ftcFE;
+  const eastAsia = hasEastAsianGrid
+    ? (eastAsiaFontIndex != null ? resolveFontName(fontTable, eastAsiaFontIndex) : (fontTable.find((font) => font?.name === "宋体")?.name ?? "宋体"))
+    : ascii;
+  const cs = stsh?.ftcBi != null ? (resolveFontName(fontTable, stsh.ftcBi) || "Times New Roman") : "Times New Roman";
+  return `<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="${escapeXml(ascii)}" w:hAnsi="${escapeXml(ascii)}" w:eastAsia="${escapeXml(eastAsia)}" w:cs="${escapeXml(cs)}"/></w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>`;
 }
 
 function createStyleXml(style, styles, fontTable = [], docGridLinePitch = null, styleOptions = {}) {
@@ -3614,6 +3682,7 @@ function buildLatentStylesXml(styles = [], wpsDocument = {}) {
     // Skip it only when ALL LSD fields match the w:latentStyles defaults
     // (defQFormat=0, defSemiHidden=1, defUnhideWhenUsed=1, defUIPriority=99),
     // in which case the lsdException would be redundant.
+    if (sti === 179 && !(styles ?? []).some(s => s?.sti === 179)) continue;
     if (sti === 179 && !latent.fQFormat && latent.fSemiHidden && latent.fUnhideWhenUsed && latent.iPriority === 99) continue;
     const attrs = [];
     // MS-DOC-SPEC/19 §StdfBase.grfstd: when a style has an actual STSH

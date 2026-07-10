@@ -30,6 +30,8 @@ const PHE_SIZE = 12;
 const SPRM_WPS_DYA_LINE = 0x6412;
 const SPRM_WPS_DYA_LINE_OPERAND_SIZE = 2;
 const FIB_FC_CHPX_INDEX = 12;
+const PNFPN_MASK = 0x003fffff;
+const FKP_PAGE_SIZE = 512;
 const FIB_FC_PLCFLST_INDEX = 73;
 const FIB_FC_PLCFLFO_INDEX = 74;
 const FIB_FC_STTBFBKMK_INDEX = 21;
@@ -67,23 +69,30 @@ export function extractWordBinaryDocument({ wordDocument, table0, table1 = null,
   if (fib.fEncrypted) {
     throw new Error("Excluded Word binary document variant: encrypted/obfuscated files are outside this parser scope");
   }
-  if ((fib.flags & FIB_F_COMPLEX) === 0) {
-    throw new Error("Unimplemented Word binary document variant: non-complex files without a CLX piece table");
-  }
-
   const tableStream = fib.whichTableStream === "1Table" ? table1 : table0;
   if (!tableStream) {
     throw new Error(`Missing required Word table stream: ${fib.whichTableStream}`);
   }
 
-  const pieces = readPieceTable(tableStream, fib.fcClx, fib.lcbClx);
+  const pieces = readDocumentPieces(wordDocument, tableStream, fib);
   const subdocuments = splitSubdocuments(wordDocument, pieces, fib.characterCounts);
   const rawText = readPieces(wordDocument, pieces);
   const bodyText = subdocuments.body.rawText;
   const dop = parseDop(tableStream, fib);
-  const { styles, latentLsd, stiMaxWhenSaved } = extractStyleSheet(tableStream, fib);
+  const { styles, latentLsd, stiMaxWhenSaved, styleSheetInfo } = extractStyleSheet(tableStream, fib);
   const fontTable = extractFontTable(tableStream, fib);
-  const sections = extractSections(wordDocument, tableStream, fib);
+  if ((styleSheetInfo?.nVerBuiltInNamesWhenSaved ?? 0) >= 7) {
+    for (const font of fontTable) {
+      if (font?.alternateName && /^[\x20-\x7e]+$/.test(font.alternateName) && /[^\x00-\x7f]/.test(font.name ?? "")) {
+        // MS-DOC-SPEC/19 Stshif.nVerBuiltInNamesWhenSaved identifies the
+        // built-in style-name generation. In newer-generation WPS exports,
+        // ASCII FFN.xszAlt values are used as OOXML face names for localized
+        // fonts, while older generations retain xszFfn as the face name.
+        font.preferredName = font.alternateName;
+      }
+    }
+  }
+  const sections = extractSections(wordDocument, tableStream, fib, bodyText);
   const listData = extractListData(tableStream, fib);
   const defaultTabStop = dop.dxaTab;
   const plcfHdd = parsePlcfHdd(tableStream, fib);
@@ -110,6 +119,7 @@ export function extractWordBinaryDocument({ wordDocument, table0, table1 = null,
     styles,
     latentLsd,
     stiMaxWhenSaved,
+    styleSheetInfo,
     fontTable,
     sections,
     listData,
@@ -428,6 +438,18 @@ function parseDop(tableStream, fib) {
     fSubsetFonts = ((dop97Flags >> 7) & 1) !== 0;
   }
 
+  // ── Dop2000 shared flags at offset 504 ────────────────────────────
+  // MS-DOC-SPEC/17 Dop2000 bits A-O begin after the 500-byte Dop97,
+  // ilvlLastBulletMain, ilvlLastNumberMain, and istdClickParaType fields.
+  // Bit N (bit 30 of the 32-bit flags field) is fCharLineUnits: if zero,
+  // character-unit indents and line-unit spacing MUST NOT be in use. Preserve
+  // the parsed bit as evidence; do not use it to synthesize paragraph values.
+  let fCharLineUnits = null;
+  if (dop.length >= 508) {
+    const dop2000Flags = dop.readUInt32LE(504);
+    fCharLineUnits = ((dop2000Flags >> 30) & 1) !== 0;
+  }
+
   // ── Dop2002 XML validation at offset 542 ──────────────────────────
   // fValidateXML (bit b) and fShowXMLErrors (bit d) have opposite sense from
   // OOXML doNotValidateAgainstSchema and doNotDemarcateInvalidXml.
@@ -488,9 +510,191 @@ function parseDop(tableStream, fib) {
     dogrid,
     pageBorderIncludes,
     fSubsetFonts,
+    fCharLineUnits,
     xmlValidation,
     grfFmtFilter,
   };
+}
+
+function readDocumentPieces(wordDocument, tableStream, fib) {
+  if (fib.fComplex) {
+    return readPieceTable(tableStream, fib.fcClx, fib.lcbClx);
+  }
+  return readNonComplexPieces(wordDocument, tableStream, fib);
+}
+
+function readNonComplexPieces(wordDocument, tableStream, fib) {
+  if (!fib.fExtChar) {
+    throw new Error("Unimplemented Word binary document variant: non-complex non-Unicode text");
+  }
+  const characterCount = totalDocumentCharacterCount(fib.characterCounts);
+  const byteLength = characterCount * 2;
+  if (fib.fcMin < 0 || fib.fcMac > wordDocument.length || fib.fcMin > fib.fcMac) {
+    throw new Error("Invalid Word binary document: non-complex fcMin/fcMac range is outside WordDocument");
+  }
+
+  const fkpInfo = collectFkpInfo(tableStream, wordDocument, fib);
+  const textRanges = trimNonComplexTextPadding(
+    subtractRanges(
+      [{ start: fib.fcMin, end: fib.fcMac }],
+      fkpInfo.pageRanges
+        .map((range) => ({
+          start: Math.max(range.start, fib.fcMin),
+          end: Math.min(range.end, fib.fcMac),
+        }))
+        .filter((range) => range.start < range.end),
+    ),
+    fkpInfo.fcBoundaries,
+    fkpInfo.pageRanges,
+    wordDocument,
+  );
+
+  const pieces = [];
+  let cp = 0;
+  let remainingBytes = byteLength;
+  for (const range of textRanges) {
+    if (remainingBytes === 0) break;
+    const availableBytes = range.end - range.start;
+    if (availableBytes % 2 !== 0) {
+      throw new Error("Invalid Word binary document: non-complex Unicode text range has odd byte length");
+    }
+    const usedBytes = Math.min(availableBytes, remainingBytes);
+    if (usedBytes === 0) continue;
+    pieces.push({
+      cpStart: cp,
+      cpEnd: cp + usedBytes / 2,
+      fileOffset: range.start,
+      compressed: false,
+      nonComplex: true,
+    });
+    cp += usedBytes / 2;
+    remainingBytes -= usedBytes;
+  }
+
+  if (remainingBytes !== 0) {
+    throw new Error("Invalid Word binary document: non-complex text ranges do not cover FibRgLw97 character counts");
+  }
+
+  // MS-DOC-SPEC/15 FibBase.fComplex records whether the last save was an
+  // incremental save. When it is zero, no CLX/Pcd piece table is used. For
+  // Unicode simple files (FibBase.fExtChar set), consume exactly the
+  // FibRgLw97 ccp* character count from the FibBase.fcMin..fcMac region,
+  // excluding parsed ChpxFkp/PapxFkp pages explicitly pointed to by the
+  // mandatory PlcBteChpx/PlcBtePapx structures (MS-DOC-SPEC/19 PnFkp*).
+  return pieces;
+}
+
+function collectFkpInfo(tableStream, wordDocument, fib) {
+  const chpx = collectFkpInfoFromPlc(tableStream, wordDocument, fib.fcChpx, fib.lcbChpx, "PlcBteChpx");
+  const papx = collectFkpInfoFromPlc(tableStream, wordDocument, fib.fcPapx, fib.lcbPapx, "PlcBtePapx");
+  return {
+    pageRanges: mergeRanges([...chpx.pageRanges, ...papx.pageRanges]),
+    fcBoundaries: [...new Set([...chpx.fcBoundaries, ...papx.fcBoundaries])].sort((a, b) => a - b),
+  };
+}
+
+function collectFkpInfoFromPlc(tableStream, wordDocument, fc, lcb, label) {
+  if (lcb < 4) {
+    throw new Error(`Invalid Word binary document: missing mandatory ${label}`);
+  }
+  if (fc + lcb > tableStream.length) {
+    throw new Error(`Invalid Word binary document: ${label} is outside the table stream`);
+  }
+  const binCount = (lcb - 4) / 8;
+  if (binCount <= 0 || !Number.isInteger(binCount)) {
+    throw new Error(`Invalid Word binary document: malformed ${label}`);
+  }
+  const ranges = [];
+  const fcBoundaries = [];
+  for (let i = 0; i <= binCount; i += 1) {
+    fcBoundaries.push(tableStream.readUInt32LE(fc + i * 4));
+  }
+  const pageNumberOffset = fc + (binCount + 1) * 4;
+  for (let i = 0; i < binCount; i += 1) {
+    const rawPn = tableStream.readUInt32LE(pageNumberOffset + i * 4);
+    const pageNumber = rawPn & PNFPN_MASK;
+    const pageStart = pageNumber * FKP_PAGE_SIZE;
+    const pageEnd = pageStart + FKP_PAGE_SIZE;
+    if (pageEnd > wordDocument.length) {
+      throw new Error(`Invalid Word binary document: ${label} FKP page is outside WordDocument`);
+    }
+    const page = wordDocument.subarray(pageStart, pageEnd);
+    const crun = page[FKP_PAGE_SIZE - 1];
+    if (crun > 0 && (crun + 1) * 4 < FKP_PAGE_SIZE) {
+      for (let f = 0; f <= crun; f += 1) {
+        fcBoundaries.push(page.readUInt32LE(f * 4));
+      }
+    }
+    ranges.push({ start: pageStart, end: pageEnd });
+  }
+  return { pageRanges: mergeRanges(ranges), fcBoundaries };
+}
+
+function trimNonComplexTextPadding(textRanges, fcBoundaries, pageRanges, wordDocument) {
+  const fkpPageStarts = new Set(pageRanges.map((range) => range.start));
+  return textRanges.map((range) => {
+    if (!fkpPageStarts.has(range.end)) return range;
+    const parsedEnd = fcBoundaries
+      .filter((fc) => fc >= range.start && fc <= range.end)
+      .at(-1);
+    if (parsedEnd == null || parsedEnd === range.end) return range;
+    const padding = wordDocument.subarray(parsedEnd, range.end);
+    if (padding.some((byte) => byte !== 0)) {
+      throw new Error("Invalid Word binary document: non-complex text padding before FKP page is non-zero");
+    }
+    // MS-DOC-SPEC/19 PapxFkp/ChpxFkp rgfc arrays contain the parsed FC
+    // boundaries for text before a page-aligned FKP. Bytes after the last
+    // parsed FC boundary and before the next 512-byte FKP page are padding,
+    // not document characters. Trim only zero padding proven by those FCs.
+    return { start: range.start, end: parsedEnd };
+  }).filter((range) => range.start < range.end);
+}
+
+function subtractRanges(baseRanges, removeRanges) {
+  let ranges = baseRanges;
+  for (const remove of mergeRanges(removeRanges)) {
+    const next = [];
+    for (const range of ranges) {
+      if (remove.end <= range.start || remove.start >= range.end) {
+        next.push(range);
+        continue;
+      }
+      if (remove.start > range.start) {
+        next.push({ start: range.start, end: remove.start });
+      }
+      if (remove.end < range.end) {
+        next.push({ start: remove.end, end: range.end });
+      }
+    }
+    ranges = next;
+  }
+  return ranges;
+}
+
+function mergeRanges(ranges) {
+  const sorted = ranges
+    .filter((range) => range.start < range.end)
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged = [];
+  for (const range of sorted) {
+    const last = merged.at(-1);
+    if (last && range.start <= last.end) {
+      last.end = Math.max(last.end, range.end);
+    } else {
+      merged.push({ start: range.start, end: range.end });
+    }
+  }
+  return merged;
+}
+
+function totalDocumentCharacterCount(counts = {}) {
+  return (counts.body ?? 0)
+    + (counts.footnotes ?? 0)
+    + (counts.headers ?? 0)
+    + (counts.annotations ?? 0)
+    + (counts.endnotes ?? 0)
+    + (counts.textboxes ?? 0)
+    + (counts.headerTextboxes ?? 0);
 }
 
 function readPieceTable(tableStream, fcClx, lcbClx) {
@@ -656,8 +860,6 @@ function parseStandardBookmarks(tableStream, fib) {
   // MS-DOC-SPEC/15: SttbfBkmk, Plcfbkf, and Plcfbkl are parallel tables.
   // MS-DOC-SPEC/19 FBKF stores a 2-byte ibkl followed by a 2-byte BKC.
   // ibkl indexes the end CP in Plcfbkl.
-  const bkf = tableStream.subarray(fib.fcPlcfBkf, fib.fcPlcfBkf + fib.lcbPlcfBkf);
-  const bkl = tableStream.subarray(fib.fcPlcfBkl, fib.fcPlcfBkl + fib.lcbPlcfBkl);
   const dataBytes = fib.lcbPlcfBkf - (names.length + 1) * 4;
   if (dataBytes < 0 || dataBytes % names.length !== 0) {
     throw new Error("Invalid Word binary document: malformed Plcfbkf bookmark PLC");
@@ -670,17 +872,82 @@ function parseStandardBookmarks(tableStream, fib) {
     throw new Error("Invalid Word binary document: malformed Plcfbkl bookmark PLC");
   }
 
+  const bkf = tableStream.subarray(fib.fcPlcfBkf, fib.fcPlcfBkf + fib.lcbPlcfBkf);
+  const bkl = tableStream.subarray(fib.fcPlcfBkl, fib.fcPlcfBkl + fib.lcbPlcfBkl);
+  const startCps = readBookmarkPlcCps(bkf, names.length, "Plcfbkf");
+  const endCps = readBookmarkPlcCps(bkl, names.length, "Plcfbkl");
+
+  const seenIbkl = new Set();
   return names.map((name, index) => {
-    const start = bkf.readUInt32LE(index * 4);
+    const start = startCps[index];
     const dataOffset = (names.length + 1) * 4 + index * bkfDataSize;
-    const endIndex = bkf.readUInt16LE(dataOffset);
-    if (endIndex >= names.length) {
-      throw new Error(`Invalid Word bookmark ${name}: end index ${endIndex} is outside Plcfbkl`);
+    const ibkl = bkf.readUInt16LE(dataOffset);
+    if (ibkl >= names.length) {
+      throw new Error(`Invalid Word bookmark ${name}: end index ${ibkl} is outside Plcfbkl`);
     }
+    if (seenIbkl.has(ibkl)) {
+      throw new Error(`Out-of-spec Word bookmark ${name}: duplicate FBKF.ibkl ${ibkl}`);
+    }
+    seenIbkl.add(ibkl);
     const bkc = bkf.readUInt16LE(dataOffset + 2);
-    const end = bkl.readUInt32LE(endIndex * 4);
-    return { id: index, name, cpStart: start, cpEnd: end, bkc };
+    const bkcInfo = parseBkc(bkc, name);
+    const end = endCps[ibkl];
+    if (start > end) {
+      throw new Error(`Out-of-spec Word bookmark ${name}: start CP ${start} is greater than end CP ${end}`);
+    }
+    return {
+      id: index,
+      name,
+      cpStart: start,
+      cpEnd: end,
+      // MS-DOC-SPEC/19 FBKF.ibkl is the zero-based index into the paired
+      // Plcfbkl whose CP gives this bookmark's limit. Preserve it because
+      // duplicate start CPs are legal in Plcfbkf, so ibkl is the explicit
+      // parsed linkage rather than an inferred row/order relationship.
+      ibkl,
+      bkc,
+      bkcInfo,
+    };
   });
+}
+
+function parseBkc(raw, bookmarkName) {
+  const bkc = {
+    raw,
+    // MS-DOC-SPEC/19 BKC: low 7 bits are itcFirst. It is ignored unless
+    // fCol is set, but preserving it avoids inferring table-column state.
+    itcFirst: raw & 0x007f,
+    fPub: ((raw >> 7) & 0x0001) !== 0,
+    itcLim: (raw >> 8) & 0x003f,
+    fNative: ((raw >> 14) & 0x0001) !== 0,
+    fCol: ((raw >> 15) & 0x0001) !== 0,
+  };
+  if (bkc.fPub) {
+    // MS-DOC-SPEC/19 BKC.fPub MUST be zero and ignored.
+    throw new Error(`Out-of-spec Word bookmark ${bookmarkName}: BKC.fPub must be zero`);
+  }
+  if (bkc.fCol && bkc.itcFirst >= bkc.itcLim) {
+    // MS-DOC-SPEC/19 BKC: for all bookmark types, itcFirst MUST be less
+    // than itcLim when fCol is nonzero.
+    throw new Error(`Out-of-spec Word bookmark ${bookmarkName}: BKC itcFirst must be less than itcLim`);
+  }
+  return bkc;
+}
+
+function readBookmarkPlcCps(plc, bookmarkCount, label) {
+  const cps = [];
+  for (let i = 0; i <= bookmarkCount; i += 1) {
+    cps.push(plc.readUInt32LE(i * 4));
+  }
+  for (let i = 1; i < cps.length; i += 1) {
+    if (cps[i] < cps[i - 1]) {
+      // MS-DOC-SPEC/12 PLC: CP arrays MUST appear in ascending order.
+      // MS-DOC-SPEC/18 bookmark PLCs may contain duplicate CPs, so equality
+      // is allowed but decreasing CPs are invalid and must fail fast.
+      throw new Error(`Out-of-spec Word bookmark ${label}: CP array is not ascending at index ${i}`);
+    }
+  }
+  return cps;
 }
 
 function parseRevisionAuthors(tableStream, fib) {
@@ -734,7 +1001,7 @@ function assertTableRange(tableStream, fc, lcb, label) {
 }
 
 function parseOfficeArtContent(tableStream, fib) {
-  if (!fib.fcDggInfo && !fib.lcbDggInfo) return new Map();
+  if (!fib.lcbDggInfo) return new Map();
   assertTableRange(tableStream, fib.fcDggInfo, fib.lcbDggInfo, "OfficeArtContent");
   const content = tableStream.subarray(fib.fcDggInfo, fib.fcDggInfo + fib.lcbDggInfo);
   if (content.length < 8) {
@@ -1027,7 +1294,7 @@ export function parseSttbfRMark(sttbf) {
 }
 
 function parseMainShapeAnchors(tableStream, fib) {
-  if (!fib.fcPlcSpaMom && !fib.lcbPlcSpaMom) return [];
+  if (!fib.lcbPlcSpaMom) return [];
   assertTableRange(tableStream, fib.fcPlcSpaMom, fib.lcbPlcSpaMom, "PlcfSpaMom");
   const plcf = tableStream.subarray(fib.fcPlcSpaMom, fib.fcPlcSpaMom + fib.lcbPlcSpaMom);
   // MS-DOC-SPEC/15 fcPlcSpaMom/lcbPlcSpaMom point to PlcfSpa. A PlcfSpa is
@@ -1083,10 +1350,15 @@ function parseMainShapeAnchors(tableStream, fib) {
 
 function parseSttbfBkmk(sttbf) {
   const names = parseUnicodeSttbNoExtra(sttbf, "SttbfBkmk");
+  const seen = new Set();
   for (const name of names) {
     if (name.length === 0 || name.length >= 40) {
       throw new Error(`Invalid Word bookmark name length ${name.length}`);
     }
+    if (seen.has(name)) {
+      throw new Error(`Out-of-spec Word bookmark duplicate name: ${name}`);
+    }
+    seen.add(name);
   }
   return names;
 }
@@ -1272,9 +1544,11 @@ function buildParagraphPropertiesFromSprms(parsed) {
     leftIndentChars: parsed.leftIndentChars ?? null,
     rightIndentChars: parsed.rightIndentChars ?? null,
     firstLineIndentChars: parsed.firstLineIndentChars ?? null,
+    firstLineIndentCharsSprm: parsed.firstLineIndentCharsSprm ?? null,
     leftIndent: parsed.leftIndent ?? null,
     rightIndent: parsed.rightIndent ?? null,
     firstLineIndent: parsed.firstLineIndent ?? null,
+    firstLineIndentSprm: parsed.firstLineIndentSprm ?? null,
     spacingBefore: parsed.spacingBefore ?? null,
     spacingAfter: parsed.spacingAfter ?? null,
     spacingBeforeLines: parsed.spacingBeforeLines ?? null,
@@ -1337,6 +1611,7 @@ function parseParagraphPropertyChange(data, parsed) {
 const STYLE_TYPE_PARAGRAPH = "paragraph";
 const STYLE_TYPE_CHARACTER = "character";
 const STYLE_TYPE_TABLE = "table";
+const STYLE_TYPE_NUMBERING = "numbering";
 const STYLE_TYPE_LIST = "list";
 
 function buildStyleId(sti, index, styles) {
@@ -1351,10 +1626,10 @@ function buildStyleName(sti, name) {
 }
 
 function buildStyleType(sgc) {
-  // stk (style kind) per MS-DOC StdfBase: 1=paragraph, 2=character, 3=table, 4=list
+  // stk (style kind) per MS-DOC StdfBase: 1=paragraph, 2=character, 3=table, 4=numbering
   if (sgc === 2) return STYLE_TYPE_CHARACTER;
   if (sgc === 3) return STYLE_TYPE_TABLE;
-  // sgc === 4 is list/numbering style; treat as paragraph for now
+  if (sgc === 4) return STYLE_TYPE_NUMBERING;
   return STYLE_TYPE_PARAGRAPH;
 }
 
@@ -1378,6 +1653,15 @@ function extractStyleSheet(tableStream, fib) {
     throw new Error(`Out-of-spec Word stylesheet: invalid Stshif.cbSTDBaseInFile ${cbSTDBaseInFile}`);
   }
   const stiMaxWhenSaved = stsh.readUInt16LE(8); // Stshif offset 6 from stshi start
+  const styleSheetInfo = {
+    // MS-DOC-SPEC/19 Stshif.ftcAsci/ftcFE/ftcOther/ftcBi are the
+    // sprmCRgFtc* / sprmCFtcBi operands for default document formatting.
+    ftcAsci: stsh.readInt16LE(14),
+    ftcFE: stsh.readInt16LE(16),
+    ftcOther: stsh.readInt16LE(18),
+    ftcBi: stsh.readInt16LE(20),
+    nVerBuiltInNamesWhenSaved: stsh.readUInt16LE(12),
+  };
   const styles = new Array(cstd).fill(null);
 
   // Parse StshiLsd at STSH offset 22 (after cbStshi 2 + stshif 18 + ftcBi 2).
@@ -1465,30 +1749,43 @@ function extractStyleSheet(tableStream, fib) {
   if (normalNextStyle?.type === STYLE_TYPE_PARAGRAPH && normalNextStyle.sti !== 0) {
     promotedStyles.add(normalNextStyle);
   }
-  const styleIdOrder = [
-    ...nonNullStyles.filter((style) => style.sti === 0),
-    ...promotedStyles,
-    ...nonNullStyles.filter((style) => (
+  // MS-DOC-SPEC/19 StdfBase.stk value 4 is a numbering style, not a
+  // paragraph style. This converter does not emit OOXML numbering styles,
+  // so exclude them from WPS paragraph/table/character style-id assignment.
+  const styleIdStyles = nonNullStyles.filter((style) => style.type !== STYLE_TYPE_NUMBERING);
+  const hasNumberingStyle = nonNullStyles.some((style) => style.type === STYLE_TYPE_NUMBERING);
+  const styleIdOrder = hasNumberingStyle ? [
+    ...styleIdStyles.filter((style) => style.sti === 0),
+    ...styleIdStyles.filter((style) => style.sti >= 1 && style.sti <= 9),
+    ...styleIdStyles.filter((style) => style.sti === 65),
+    ...styleIdStyles.filter((style) => style.sti === 105),
+    ...styleIdStyles.filter((style) => style.type === STYLE_TYPE_PARAGRAPH && style.sti !== 0 && !(style.sti >= 1 && style.sti <= 9)),
+    ...styleIdStyles.filter((style) => style.type === STYLE_TYPE_TABLE && style.sti !== 105),
+    ...styleIdStyles.filter((style) => style.type === STYLE_TYPE_CHARACTER && style.sti !== 65),
+  ] : [
+    ...styleIdStyles.filter((style) => style.sti === 0),
+    ...[...promotedStyles].filter((style) => style.type !== STYLE_TYPE_NUMBERING),
+    ...styleIdStyles.filter((style) => (
       style.sti !== 0
       && !defaults.has(style.sti)
       && style.type === STYLE_TYPE_PARAGRAPH
       && style.sti < 179
       && !promotedStyles.has(style)
     )),
-    ...nonNullStyles.filter((style) => style.sti === 105),
-    ...nonNullStyles.filter((style) => (
+    ...styleIdStyles.filter((style) => style.sti === 105),
+    ...styleIdStyles.filter((style) => (
       style.sti !== 105
       && style.type === STYLE_TYPE_TABLE
       && style.sti < 179
     )),
-    ...nonNullStyles.filter((style) => style.sti === 65),
-    ...nonNullStyles.filter((style) => (
+    ...styleIdStyles.filter((style) => style.sti === 65),
+    ...styleIdStyles.filter((style) => (
       style.sti !== 65
       && style.sti !== 105
       && style.type === STYLE_TYPE_CHARACTER
       && style.sti < 179
     )),
-    ...nonNullStyles.filter((style) => (
+    ...styleIdStyles.filter((style) => (
       style.sti !== 0
       && style.sti !== 65
       && style.sti !== 105
@@ -1502,7 +1799,7 @@ function extractStyleSheet(tableStream, fib) {
     styleIdOrder[i].styleId = String(i + 1);
   }
 
-  return { styles, latentLsd, stiMaxWhenSaved };
+  return { styles, latentLsd, stiMaxWhenSaved, styleSheetInfo };
 }
 
 function createSyntheticNormalTableStyle(index) {
@@ -1675,9 +1972,11 @@ function parseStd(std, index, cbSTDBaseInFile) {
     leftIndentChars: parsed.leftIndentChars ?? null,
     rightIndentChars: parsed.rightIndentChars ?? null,
     firstLineIndentChars: parsed.firstLineIndentChars ?? null,
+    firstLineIndentCharsSprm: parsed.firstLineIndentCharsSprm ?? null,
     leftIndent: parsed.leftIndent ?? null,
     rightIndent: parsed.rightIndent ?? null,
     firstLineIndent: parsed.firstLineIndent ?? null,
+    firstLineIndentSprm: parsed.firstLineIndentSprm ?? null,
     spacingBefore: parsed.spacingBefore ?? null,
     spacingAfter: parsed.spacingAfter ?? null,
     spacingBeforeLines: parsed.spacingBeforeLines ?? null,
@@ -1903,7 +2202,7 @@ function readFfnString(ffn, offset) {
   return name;
 }
 
-function extractSections(wordDocument, tableStream, fib) {
+function extractSections(wordDocument, tableStream, fib, bodyText = "") {
   if (!fib.lcbPlcfSed || fib.lcbPlcfSed < 16) return [];
   if (fib.fcPlcfSed + fib.lcbPlcfSed > tableStream.length) return [];
 
@@ -1912,11 +2211,17 @@ function extractSections(wordDocument, tableStream, fib) {
   const sectionCount = (fib.lcbPlcfSed - 4) / (4 + sedSize);
   if (!Number.isInteger(sectionCount) || sectionCount <= 0) return [];
 
+  const sectionCps = [];
+  for (let i = 0; i <= sectionCount; i += 1) {
+    sectionCps.push(plcf.readUInt32LE(i * 4));
+  }
+  validatePlcfSedCps(sectionCps, bodyText);
+
   const sections = [];
   const sedStart = (sectionCount + 1) * 4;
   for (let i = 0; i < sectionCount; i += 1) {
-    const cpStart = plcf.readUInt32LE(i * 4);
-    const cpEnd = plcf.readUInt32LE((i + 1) * 4);
+    const cpStart = sectionCps[i];
+    const cpEnd = sectionCps[i + 1];
     const sedOffset = sedStart + i * sedSize;
     const fcSepx = plcf.readUInt32LE(sedOffset + 2);
     const properties = fcSepx === 0xffffffff
@@ -1932,6 +2237,30 @@ function extractSections(wordDocument, tableStream, fib) {
   return sections;
 }
 
+function validatePlcfSedCps(cps, bodyText) {
+  for (let i = 1; i < cps.length; i += 1) {
+    if (cps[i] <= cps[i - 1]) {
+      // MS-DOC-SPEC/18 PlcfSed: section CPs MUST NOT contain duplicates,
+      // and each section range ends immediately before the next CP.
+      throw new Error(`Out-of-spec PlcfSed CP array is not strictly ascending at index ${i}`);
+    }
+  }
+  const lastCp = cps.at(-1);
+  if (lastCp < bodyText.length) {
+    // MS-DOC-SPEC/18 PlcfSed: the final CP does not start a section and
+    // MUST be at or beyond the end of the main document.
+    throw new Error("Out-of-spec PlcfSed final CP is before the end of the main document");
+  }
+  for (let i = 0; i < cps.length - 2; i += 1) {
+    const cpEnd = cps[i + 1];
+    if (cpEnd > bodyText.length || bodyText[cpEnd - 1] !== "\f") {
+      // MS-DOC-SPEC/18 PlcfSed: every non-final section's last character
+      // in the main-document text range MUST be end-of-section 0x0C.
+      throw new Error(`Out-of-spec PlcfSed section ${i} does not end with an end-of-section character`);
+    }
+  }
+}
+
 function readSectionProperties(wordDocument, fcSepx) {
   if (fcSepx + 2 > wordDocument.length) {
     throw new Error("Invalid Word binary document: SEPX points outside WordDocument");
@@ -1942,10 +2271,10 @@ function readSectionProperties(wordDocument, fcSepx) {
     throw new Error("Invalid Word binary document: truncated SEPX");
   }
 
-  return parseSectionSprms(wordDocument.subarray(fcSepx + 2, fcSepx + 2 + cb));
+  return parseSectionSprms(wordDocument.subarray(fcSepx + 2, fcSepx + 2 + cb), { validateRequiredSectionProperties: true });
 }
 
-export function parseSectionSprms(grpprl) {
+export function parseSectionSprms(grpprl, options = {}) {
   const props = {};
   let off = 0;
   while (off + 2 <= grpprl.length) {
@@ -1965,7 +2294,86 @@ export function parseSectionSprms(grpprl) {
     applySectionSprm(props, sprm, val);
     off += size;
   }
+  if (off !== grpprl.length) {
+    throw new Error("Truncated section SPRM code at end of SEPX grpprl");
+  }
+  validateSectionProperties(props, options);
   return props;
+}
+
+function validateSectionProperties(props, options = {}) {
+  validateSectionPageAndMarginProperties(props, options);
+  if (props.docGridType != null && ![0, 1, 2, 3].includes(props.docGridType)) {
+    // MS-DOC-SPEC/19 SClmOperand enumerates only clmUseDefault,
+    // clmCharsAndLines, clmLinesOnly, and clmEnforceGrid.
+    throw new Error(`Out-of-spec section document grid mode ${props.docGridType}`);
+  }
+  if (props.docGridCharSpace != null
+    && (props.docGridCharSpace < -670925 || props.docGridCharSpace > 6488064)) {
+    // MS-DOC-SPEC/16 sprmSDxtCharSpace MUST be in this range.
+    throw new Error(`Out-of-spec section document grid character spacing ${props.docGridCharSpace}`);
+  }
+  if (props.docGridLinePitch != null
+    && (props.docGridLinePitch < 1 || props.docGridLinePitch > 31680)) {
+    // MS-DOC-SPEC/16 sprmSDyaLinePitch MUST be 1..31680 twips.
+    throw new Error(`Out-of-spec section document grid line pitch ${props.docGridLinePitch}`);
+  }
+  if (props.docGridType === 1 || props.docGridType === 2 || props.docGridType === 3) {
+    if (props.docGridLinePitch == null) {
+      // MS-DOC-SPEC/16 sprmSDyaLinePitch: if the document grid is enabled
+      // by sprmSClm, the section MUST specify the grid line height.
+      throw new Error("Out-of-spec section document grid is enabled without sprmSDyaLinePitch");
+    }
+  }
+}
+
+function validateSectionPageAndMarginProperties(props, options = {}) {
+  if (props.pageWidth != null && (props.pageWidth < 144 || props.pageWidth > 31680)) {
+    // MS-DOC-SPEC/16 sprmSXaPage MUST be in [144, 31680] twips.
+    throw new Error(`Out-of-spec section page width ${props.pageWidth}`);
+  }
+  if (props.pageHeight != null && (props.pageHeight < 144 || props.pageHeight > 31680)) {
+    // MS-DOC-SPEC/16 sprmSYaPage MUST be in [144, 31680] twips.
+    throw new Error(`Out-of-spec section page height ${props.pageHeight}`);
+  }
+  for (const [key, label] of [["marginLeft", "left"], ["marginRight", "right"], ["gutterMargin", "gutter"]]) {
+    if (props[key] != null && (props[key] < 0 || props[key] > 31680)) {
+      // MS-DOC-SPEC/19 XAS_nonNeg values MUST be <= 31680 twips.
+      throw new Error(`Out-of-spec section ${label} margin ${props[key]}`);
+    }
+  }
+  for (const [key, label] of [["headerMargin", "header"], ["footerMargin", "footer"]]) {
+    if (props[key] != null && props[key] > 31680) {
+      // MS-DOC-SPEC/19 YAS_nonNeg values MUST be <= 31680 twips.
+      throw new Error(`Out-of-spec section ${label} margin ${props[key]}`);
+    }
+  }
+  for (const [key, label] of [["marginTop", "top"], ["marginBottom", "bottom"]]) {
+    if (props[key] != null && (props[key] < -31665 || props[key] > 31665)) {
+      // MS-DOC-SPEC/16 sprmSDyaTop/sprmSDyaBottom MUST be [-31665, 31665].
+      throw new Error(`Out-of-spec section ${label} margin ${props[key]}`);
+    }
+  }
+  if (options.validateRequiredSectionProperties) {
+    for (const [key, sprmName] of [
+      ["marginLeft", "sprmSDxaLeft"],
+      ["marginRight", "sprmSDxaRight"],
+      ["marginTop", "sprmSDyaTop"],
+      ["marginBottom", "sprmSDyaBottom"],
+    ]) {
+      if (props[key] == null) {
+        // MS-DOC-SPEC/16 requires each section to explicitly specify these
+        // implementation-dependent margins; fail instead of emitting guessed
+        // OOXML page margins.
+        throw new Error(`Out-of-spec section is missing required ${sprmName}`);
+      }
+    }
+    Object.defineProperty(props, "_msDocRequiredSectionPropertiesValidated", {
+      value: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
 }
 
 function sectionSprmOperandSize(sprm) {
@@ -2165,10 +2573,14 @@ function applySectionSprm(props, sprm, val) {
       props.marginRight = val.readUInt16LE(0);
       break;
     case 0x9023:
-      props.marginTop = val.readUInt16LE(0);
+      // MS-DOC-SPEC/16 sprmSDyaTop is a signed YAS; negative values
+      // specify fixed margins rather than minimum margins.
+      props.marginTop = val.readInt16LE(0);
       break;
     case 0x9024:
-      props.marginBottom = val.readUInt16LE(0);
+      // MS-DOC-SPEC/16 sprmSDyaBottom is a signed YAS; negative values
+      // specify fixed margins rather than minimum margins.
+      props.marginBottom = val.readInt16LE(0);
       break;
     case 0xb025:
       // MS-DOC-SPEC/16 sprmSDzaGutter: gutter margin in twips.
@@ -2916,7 +3328,19 @@ function findRowPropertyForRange(rowProperties, cpStart, cpEnd, cellCount) {
   if (!rowProperties || rowProperties.length === 0) return null;
 
   const overlapping = rowProperties.filter((entry) => rangesOverlap(entry, { cpStart, cpEnd }));
-  if (overlapping.length === 0) return null;
+  if (overlapping.length === 0) {
+    // MS-DOC-SPEC/19 PapxFkp.rgfc can point at an end-of-row mark, and the
+    // corresponding PapxInFkp contains the table properties for the row whose
+    // end-of-row mark is at that offset. In simple/non-complex files, a final
+    // body table row can have that row-mark PAPX at the first CP after the
+    // body subdocument; accept only that adjacent one-character row mark and
+    // only when its parsed TDefTable column count exactly matches the row.
+    return rowProperties.findLast((entry) =>
+      entry.cpStart === cpEnd &&
+      entry.cpEnd === cpEnd + 1 &&
+      entry.columns?.length === cellCount + 1
+    ) ?? null;
+  }
 
   const exactCellCount = overlapping.findLast((entry) => entry.columns?.length === cellCount + 1);
   if (exactCellCount) return exactCellCount;
@@ -3401,14 +3825,12 @@ function inferTableIndent(rows, gridPositions = null) {
     }
   }
 
-  // MS-DOC-SPEC/19 TDefTableOperand: rgdxaCenter[0] is the logical-left
-  // table edge, "indented from the logical left page margin"; preserve that
-  // parsed edge as OOXML table indentation for flow tables.
+  // MS-DOC-SPEC/16 sprmTWidthIndent is the table's preferred leading
+  // indent, so when it is explicitly present preserve it as OOXML tblInd.
+  // If it is absent, use MS-DOC-SPEC/19 TDefTableOperand.rgdxaCenter[0],
+  // the parsed logical-left table edge, as the table indentation source.
   const geometryIndent = gridPositions?.[0] ? { width: gridPositions[0], type: "dxa" } : null;
-  if (indent && indent.width !== 0 && geometryIndent && (indent.width !== geometryIndent.width || indent.type !== geometryIndent.type)) {
-    throw new Error("Conflicting table indent and table geometry were parsed for a single table");
-  }
-  return geometryIndent ?? (indent?.width !== 0 ? indent : null);
+  return (indent?.width !== 0 ? indent : null) ?? geometryIndent;
 }
 
 function inferTableAutofit(rows) {

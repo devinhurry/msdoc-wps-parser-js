@@ -1,5 +1,8 @@
 const SPRM_SIZES = {
-  0x0800: 1, 0x0801: 1, 0x0802: 1,
+  0x0800: 1, 0x0801: 1, 0x0802: 1, 0x0806: 1, 0x080A: 1,
+  0x0855: 1, 0x0856: 1, 0x6A03: 4,
+  0x6C02: 4, 0x6C03: 4, 0x6C04: 4, 0x6C05: 4,
+  0xCE08: -1, 0xCE09: -1, 0xCE0A: -1, 0xCE0B: -1,
   0x2400: 4, 0x2401: 4, 0x2402: 2, 0x2403: 1, 0x2404: 1,
   0x2405: 1, 0x2406: 1, 0x2407: 1, 0x2408: 1, 0x2409: 1,
   0x240A: 4, 0x240B: 1, 0x240C: 4, 0x240D: 4, 0x240E: 4,
@@ -101,6 +104,13 @@ const SPRM_CATEGORIES = {
   0x4A51: "fontHAnsi",
   0x4A61: "fontSizeCs",
   0x4A5E: "fontCs",
+  0x6A03: "pictureLocation",
+  0x0806: "binaryData",
+  0x080A: "ole2",
+  0x0855: "specialCharacter",
+  0x0856: "embeddedObject",
+  0x6C02: "pictureBorderTop", 0x6C03: "pictureBorderLeft", 0x6C04: "pictureBorderBottom", 0x6C05: "pictureBorderRight",
+  0xCE08: "pictureBorderTop", 0xCE09: "pictureBorderLeft", 0xCE0A: "pictureBorderBottom", 0xCE0B: "pictureBorderRight",
   0x6A09: "symbol",
   0x484B: "kern",
   0x485F: "langIdBidi",
@@ -467,6 +477,39 @@ function applySprm(props, sprm, val, size) {
     case 0x8840:
       props.charSpacing = val.readInt16LE(0);
       break;
+    case 0x6A03:
+      props.pictureLocation = val.readInt32LE(0);
+      break;
+    case 0x0806:
+      props.binaryData = val[0] !== 0;
+      break;
+    case 0x080A:
+      props.ole2 = val[0] !== 0;
+      break;
+    case 0x0855:
+      props.specialCharacter = val[0] !== 0;
+      break;
+    case 0x0856:
+      props.embeddedObject = val[0] !== 0;
+      break;
+    case 0x6C02:
+    case 0x6C03:
+    case 0x6C04:
+    case 0x6C05: {
+      const side = ["top", "left", "bottom", "right"][sprm - 0x6C02];
+      props.pictureBorders ??= {};
+      props.pictureBorders[side] = parseBrc80(val, { preserveNone: true });
+      break;
+    }
+    case 0xCE08:
+    case 0xCE09:
+    case 0xCE0A:
+    case 0xCE0B: {
+      const side = ["top", "left", "bottom", "right"][sprm - 0xCE08];
+      props.pictureBorders ??= {};
+      props.pictureBorders[side] = parseBrcOperand(val, `inline picture ${side} border`, { preserveNone: true });
+      break;
+    }
     case 0x4852:
       props.charWidth = val.readUInt16LE(0);
       break;

@@ -5,7 +5,7 @@ import { readWps, normalizeComparableText } from "../src/index.js";
 import { wpsToDocxBuffer } from "../src/docx.js";
 import { lcidToBcp47 } from "../src/lcid.js";
 import { BRC_TYPE_NAMES, brcColorFromIco, parseSprms } from "../src/sprm.js";
-import { parseSectionSprms, parseSttbfRMark } from "../src/word-binary.js";
+import { parseComments, parseFieldPlc, parseNoteReferencePlc, parseNoteTextPlc, parsePlcfHdd, parseSectionSprms, parseSttbfRMark, parseTextboxTextPlc, textDecoderEncodingForLid } from "../src/word-binary.js";
 import { readDocxMainText, readDocxDocumentXml, readZipEntry } from "./fixtures-docx.js";
 
 function findParagraphXml(xml, text) {
@@ -52,14 +52,62 @@ function countXmlLineEdits(actualXml, expectedXml) {
 
 const BASIC_WPS = "sample/basic/original.wps";
 const BASIC_DOCX = "sample/basic/expected.docx";
-const FULL_WPS = "sample/full/original.wps";
-const FULL_DOCX = "sample/full/expected.docx";
+const FULL_WPS = "sample/sample1/original.wps";
+const FULL_DOCX = "sample/sample1/expected.docx";
 const TABLE2_WPS = "sample/table2/original.wps";
 const TABLE6_DOCX = "sample/table6/expected.docx";
 const SAMPLE8_WPS = "sample/sample8/original.wps";
 const SAMPLE9_WPS = "sample/sample9/original.wps";
 const SAMPLE10_WPS = "sample/sample10/original.wps";
 const SAMPLE11_WPS = "sample/sample11/original.wps";
+
+function buildFieldPlc(records, terminalCp = null) {
+  const buffer = Buffer.alloc(records.length * 6 + 4);
+  records.forEach((record, index) => buffer.writeUInt32LE(record.cp, index * 4));
+  const lastCp = terminalCp ?? ((records.at(-1)?.cp ?? 0) + 1);
+  buffer.writeUInt32LE(lastCp, records.length * 4);
+  const fldOffset = (records.length + 1) * 4;
+  records.forEach((record, index) => {
+    buffer[fldOffset + index * 2] = record.fldch ?? record.ch;
+    buffer[fldOffset + index * 2 + 1] = record.grffld;
+  });
+  return buffer;
+}
+
+function buildMinimalWpsDocument(bodyText, overrides = {}) {
+  return {
+    bodyText,
+    defaultTabStop: 720,
+    paragraphProperties: [{}],
+    characterProperties: Array.from({ length: bodyText.length }, () => ({})),
+    sections: [{ cpStart: 0, cpEnd: bodyText.length, properties: {} }],
+    fields: {
+      body: { records: [] },
+      headers: { records: [] },
+      footnotes: { records: [] },
+      annotations: { records: [] },
+      endnotes: { records: [] },
+      textboxes: { records: [] },
+      headerTextboxes: { records: [] },
+    },
+    footnotes: { references: [], stories: [] },
+    endnotes: { references: [], stories: [] },
+    comments: { comments: [], authors: [] },
+    fib: {
+      fComplex: true,
+      characterCounts: { body: bodyText.length, headers: 0, footnotes: 0, annotations: 0, endnotes: 0, textboxes: 0, headerTextboxes: 0 },
+      lcbPlcSpaMom: 0,
+      lcbPlcSpaHdr: 0,
+    },
+    dop: {
+      dxaHotZ: 360,
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+    ...overrides,
+  };
+}
 
 function buildUnicodeSttbNoExtra(strings) {
   const parts = [];
@@ -487,7 +535,7 @@ test("MS-DOC LID mapping uses spec LCID tables without generic language fallback
 });
 
 test("sample document.xml matches WPS expected export without metadata noise", async () => {
-  for (const sample of ["basic", "full", "sample2", "sample3", "sample4", "sample5", "sample6", "table2", "table4", "table6", "tables"]) {
+  for (const sample of ["basic", "sample1", "sample2", "sample3", "sample4", "sample5", "sample6", "table2", "table4", "table6", "tables"]) {
     const wps = readWps(await readFile(`sample/${sample}/original.wps`));
     const convertedXml = readDocxDocumentXml(wpsToDocxBuffer(wps, { title: sample }));
     const expectedXml = readDocxDocumentXml(await readFile(`sample/${sample}/expected.docx`));
@@ -689,6 +737,266 @@ test("direct paragraph outline level is preserved from sprmPOutLvl", async () =>
 
   const xml = readDocxDocumentXml(wpsToDocxBuffer(sample9, { title: "sample9" }));
   assert.equal((xml.match(/<w:outlineLvl w:val="9"\/>/g) ?? []).length, 3);
+});
+
+test("parses authoritative MS-DOC PlcfHdd stories and emits real header/footer content", () => {
+  const defaultHeader = "Header text\r";
+  const defaultFooter = "\x13 PAGE \\* MERGEFORMAT \x14 7 \x15\r";
+  const headerText = defaultHeader + defaultFooter;
+  const cps = [0, 0, 0, 0, 0, 0, 0, 0, defaultHeader.length, defaultHeader.length, headerText.length, headerText.length, headerText.length];
+  const tableStream = Buffer.alloc(cps.length * 4);
+  cps.forEach((cp, index) => tableStream.writeUInt32LE(cp, index * 4));
+  const plcfHdd = parsePlcfHdd(tableStream, {
+    fcPlcfHdd: 0,
+    lcbPlcfHdd: tableStream.length,
+    characterCounts: { headers: headerText.length },
+  }, headerText, 1);
+  const footerCp = defaultHeader.length;
+  const headerFieldBuffer = buildFieldPlc([
+    { cp: footerCp, ch: 0x13, grffld: 0x21 },
+    { cp: footerCp + defaultFooter.indexOf("\x14"), ch: 0x14, grffld: 0xff },
+    { cp: footerCp + defaultFooter.indexOf("\x15"), ch: 0x15, grffld: 0x80 },
+  ], headerText.length + 100);
+  const headerFields = parseFieldPlc(headerFieldBuffer, 0, headerFieldBuffer.length, headerText, "Header Document");
+
+  assert.equal(plcfHdd.sections.length, 1);
+  assert.equal(plcfHdd.sections[0].defaultHeader.text, "Header text");
+  assert.equal(plcfHdd.sections[0].defaultFooter.text, "\x13 PAGE \\* MERGEFORMAT \x14 7 \x15");
+  assert.equal(plcfHdd.sections[0].evenHeader.empty, true);
+
+  const docx = wpsToDocxBuffer({
+    bodyText: "A\r",
+    defaultTabStop: 720,
+    paragraphProperties: [{}],
+    characterProperties: [{}, {}],
+    sections: [{ cpStart: 0, cpEnd: 2, properties: {} }],
+    plcfHdd,
+    fields: { headers: headerFields, body: { records: [] } },
+    fib: {
+      fComplex: true,
+      characterCounts: { headers: headerText.length },
+      lcbPlcSpaMom: 0,
+      lcbPlcSpaHdr: 0,
+    },
+    dop: {
+      dxaHotZ: 360,
+      pageBorderIncludes: { header: false, footer: false },
+      dogrid: { dxaGrid: 180, dyaGrid: 156, dxGridDisplay: 0, dyGridDisplay: 2 },
+      compatibility: { ulTrailSpace: true },
+    },
+  }, { title: "authoritative-plcfhdd" });
+
+  const documentXml = readDocxDocumentXml(docx);
+  const relsXml = readZipEntry(docx, "word/_rels/document.xml.rels").toString("utf8");
+  const headerXml = readZipEntry(docx, "word/header1.xml").toString("utf8");
+  const footerXml = readZipEntry(docx, "word/footer1.xml").toString("utf8");
+  assert.match(documentXml, /<w:headerReference r:id="rId5" w:type="default"\/>/);
+  assert.match(documentXml, /<w:footerReference r:id="rId6" w:type="default"\/>/);
+  assert.match(relsXml, /Id="rId5"[^>]*relationships\/header"[^>]*Target="header1\.xml"/);
+  assert.match(relsXml, /Id="rId6"[^>]*relationships\/footer"[^>]*Target="footer1\.xml"/);
+  assert.match(headerXml, /<w:t>Header text<\/w:t>/);
+  assert.match(footerXml, /<w:fldChar w:fldCharType="begin"\/>/);
+  assert.ok(footerXml.includes(`<w:instrText xml:space="preserve"> PAGE \\* MERGEFORMAT </w:instrText>`));
+  assert.match(footerXml, /<w:fldChar w:fldCharType="separate"\/>/);
+  assert.match(footerXml, /<w:t xml:space="preserve"> 7 <\/w:t>/);
+  assert.match(footerXml, /<w:fldChar w:fldCharType="end"\/>/);
+});
+
+test("PlcfHdd fails fast on malformed story boundaries", () => {
+  const tableStream = Buffer.alloc(13 * 4);
+  const cps = [0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 4, 4, 4];
+  cps.forEach((cp, index) => tableStream.writeUInt32LE(cp, index * 4));
+  assert.throws(
+    () => parsePlcfHdd(tableStream, {
+      fcPlcfHdd: 0,
+      lcbPlcfHdd: tableStream.length,
+      characterCounts: { headers: 4 },
+    }, "A\rB\r", 1),
+    /PlcfHdd CP array is not ascending/,
+  );
+});
+
+test("Plcfld parses nested fields and preserves authoritative field flags", () => {
+  const text = "\x13 IF \x13 PAGE \x14 1 \x15 = 1 \x14 Yes \x15\r";
+  const positions = [];
+  for (let cp = 0; cp < text.length; cp += 1) {
+    const ch = text.charCodeAt(cp);
+    if (ch === 0x13 || ch === 0x14 || ch === 0x15) positions.push({ cp, ch });
+  }
+  const plc = buildFieldPlc([
+    { ...positions[0], grffld: 0x07 },
+    { ...positions[1], grffld: 0x21 },
+    { ...positions[2], grffld: 0xff },
+    { ...positions[3], grffld: 0xc4 },
+    { ...positions[4], grffld: 0xff },
+    { ...positions[5], grffld: 0x90 },
+  ], text.length + 200);
+  const parsed = parseFieldPlc(plc, 0, plc.length, text, "Main Document");
+
+  assert.equal(parsed.records.length, 6);
+  assert.equal(parsed.fields.length, 2);
+  assert.equal(parsed.fields[0].begin.fieldType, 0x07);
+  assert.equal(parsed.fields[0].separator.cp, positions[4].cp);
+  assert.equal(parsed.fields[0].begin.endFlags.locked, true);
+  assert.equal(parsed.fields[1].nested, true);
+  assert.equal(parsed.fields[1].begin.endFlags.resultsDirty, true);
+});
+
+test("Plcfld fails fast on duplicate CPs and text mismatches", () => {
+  const duplicate = buildFieldPlc([
+    { cp: 0, ch: 0x13, grffld: 0x21 },
+    { cp: 0, ch: 0x15, grffld: 0x00 },
+  ], 4);
+  assert.throws(
+    () => parseFieldPlc(duplicate, 0, duplicate.length, "\x13\x15", "Main Document"),
+    /not strictly ascending/,
+  );
+
+  const mismatch = buildFieldPlc([
+    { cp: 0, ch: 0x13, grffld: 0x21 },
+    { cp: 1, ch: 0x15, grffld: 0x00 },
+  ], 4);
+  assert.throws(
+    () => parseFieldPlc(mismatch, 0, mismatch.length, "AB", "Main Document"),
+    /does not match story character/,
+  );
+});
+
+test("sample8 body fields use parsed Plcfld structure for nested DOCX fields", async () => {
+  const wps = readWps(await readFile(SAMPLE8_WPS));
+  assert.equal(wps.fields.body.records.length, 57);
+  assert.equal(wps.fields.body.fields[0].end.cp, 4724);
+  const xml = readDocxDocumentXml(wpsToDocxBuffer(wps, { title: "sample8-fields" }));
+  assert.match(xml, /<w:fldChar w:fldCharType="begin"\/>/);
+  assert.match(xml, /<w:instrText[^>]*>[^<]+<\/w:instrText>/);
+  assert.match(xml, /<w:fldChar w:fldCharType="separate"\/>/);
+  assert.match(xml, /<w:fldChar w:fldCharType="end"\/>/);
+});
+
+test("note reference/text PLCs parse authoritative ranges", () => {
+  const bodyText = "A\x02B\x02\r";
+  const refPlc = Buffer.alloc(16);
+  refPlc.writeUInt32LE(1, 0);
+  refPlc.writeUInt32LE(3, 4);
+  refPlc.writeUInt32LE(100, 8);
+  refPlc.writeUInt16LE(1, 12);
+  refPlc.writeUInt16LE(1, 14);
+  const refs = parseNoteReferencePlc(refPlc, 0, refPlc.length, bodyText, "footnote");
+  assert.deepEqual(refs.references.map((reference) => reference.cp), [1, 3]);
+
+  const storyText = "\x02First\r\x02Second\rX";
+  const textPlc = Buffer.alloc(16);
+  [0, 7, storyText.length - 1, 100].forEach((cp, index) => textPlc.writeUInt32LE(cp, index * 4));
+  const texts = parseNoteTextPlc(textPlc, 0, textPlc.length, storyText, 2, "footnote");
+  assert.equal(texts.stories[0].text, "\x02First");
+  assert.equal(texts.stories[1].text, "\x02Second");
+});
+
+test("comment PLCs parse zero-length references, authors, initials, and text", () => {
+  const table = Buffer.alloc(256);
+  const authors = Buffer.concat([Buffer.from([4, 0]), Buffer.from("Gary", "utf16le")]);
+  authors.copy(table, 0);
+  const refFc = 32;
+  table.writeUInt32LE(1, refFc);
+  table.writeUInt32LE(100, refFc + 4);
+  const atrd = refFc + 8;
+  table.writeUInt16LE(2, atrd);
+  Buffer.from("LG", "utf16le").copy(table, atrd + 2);
+  table.writeUInt16LE(0, atrd + 20);
+  table.writeUInt16LE(0, atrd + 22);
+  table.writeUInt16LE(0, atrd + 24);
+  table.writeInt32LE(-1, atrd + 26);
+  const textFc = 96;
+  const commentStory = "\x05Note\rX";
+  [0, commentStory.length - 1, 200].forEach((cp, index) => table.writeUInt32LE(cp, textFc + index * 4));
+  const parsed = parseComments(table, {
+    fcGrpXstAtnOwners: 0,
+    lcbGrpXstAtnOwners: authors.length,
+    fcPlcfandRef: refFc,
+    lcbPlcfandRef: 38,
+    fcPlcfandTxt: textFc,
+    lcbPlcfandTxt: 12,
+    fcSttbfAtnBkmk: 0,
+    lcbSttbfAtnBkmk: 0,
+    fcPlcfAtnBkf: 0,
+    lcbPlcfAtnBkf: 0,
+    fcPlcfAtnBkl: 0,
+    lcbPlcfAtnBkl: 0,
+  }, "A\x05\r", commentStory);
+  assert.deepEqual(parsed.authors, ["Gary"]);
+  assert.equal(parsed.comments[0].initials, "LG");
+  assert.equal(parsed.comments[0].author, "Gary");
+  assert.equal(parsed.comments[0].story.text, "Note");
+  assert.equal(parsed.comments[0].cpStart, 1);
+  assert.equal(parsed.comments[0].cpEnd, 1);
+});
+
+test("textbox PLCs parse actual FTXBXS shape linkage and reusable tail", () => {
+  const storyText = "Text\r";
+  const plc = Buffer.alloc(56);
+  [0, storyText.length, 100].forEach((cp, index) => plc.writeUInt32LE(cp, index * 4));
+  const first = 12;
+  plc.writeUInt32LE(1, first);
+  plc.writeUInt32LE(0, first + 4);
+  plc.writeUInt16LE(0, first + 8);
+  plc.writeUInt32LE(0xffffffff, first + 10);
+  plc.writeUInt32LE(1234, first + 14);
+  plc.writeUInt32LE(0, first + 18);
+  const last = first + 22;
+  plc.writeUInt32LE(0xffffffff, last);
+  plc.writeUInt32LE(0, last + 4);
+  plc.writeUInt16LE(0, last + 8);
+  plc.writeUInt32LE(0, last + 10);
+  plc.writeUInt32LE(0, last + 14);
+  plc.writeUInt32LE(0, last + 18);
+  const parsed = parseTextboxTextPlc(plc, 0, plc.length, storyText, "Textbox Document");
+  assert.equal(parsed.textboxes.length, 1);
+  assert.equal(parsed.textboxes[0].lid, 1234);
+  assert.equal(parsed.textboxes[0].text, "Text");
+  assert.equal(parsed.entries[1].reusable, true);
+});
+
+test("DOCX emits parsed footnotes, endnotes, comments, and main-story references", () => {
+  const bodyText = "A\x02B\x02C\x05\r";
+  const wps = buildMinimalWpsDocument(bodyText, {
+    footnotes: {
+      references: [{ id: 1, cp: 1, automatic: true, indexValue: 1 }],
+      stories: [{ id: 1, cpStart: 0, cpEnd: 11, rawText: "\x02Footnote\r", text: "\x02Footnote" }],
+    },
+    endnotes: {
+      references: [{ id: 1, cp: 3, automatic: true, indexValue: 1 }],
+      stories: [{ id: 1, cpStart: 0, cpEnd: 10, rawText: "\x02Endnote\r", text: "\x02Endnote" }],
+    },
+    comments: {
+      authors: ["Gary"],
+      comments: [{
+        id: 0,
+        cp: 5,
+        cpStart: 5,
+        cpEnd: 5,
+        author: "Gary",
+        initials: "LG",
+        story: { id: 1, cpStart: 0, cpEnd: 9, rawText: "Comment\r", text: "Comment" },
+      }],
+    },
+  });
+  const docx = wpsToDocxBuffer(wps, { title: "semantic-stories" });
+  const documentXml = readDocxDocumentXml(docx);
+  const footnotesXml = readZipEntry(docx, "word/footnotes.xml").toString("utf8");
+  const endnotesXml = readZipEntry(docx, "word/endnotes.xml").toString("utf8");
+  const commentsXml = readZipEntry(docx, "word/comments.xml").toString("utf8");
+  const relsXml = readZipEntry(docx, "word/_rels/document.xml.rels").toString("utf8");
+  const contentTypes = readZipEntry(docx, "[Content_Types].xml").toString("utf8");
+
+  assert.match(documentXml, /<w:footnoteReference w:id="1"\/>/);
+  assert.match(documentXml, /<w:endnoteReference w:id="1"\/>/);
+  assert.match(documentXml, /<w:commentRangeStart w:id="0"\/><w:commentRangeEnd w:id="0"\/>/);
+  assert.match(documentXml, /<w:commentReference w:id="0"\/>/);
+  assert.match(footnotesXml, /<w:footnote w:id="1">[\s\S]*<w:footnoteRef\/>[\s\S]*<w:t>Footnote<\/w:t>/);
+  assert.match(endnotesXml, /<w:endnote w:id="1">[\s\S]*<w:endnoteRef\/>[\s\S]*<w:t>Endnote<\/w:t>/);
+  assert.match(commentsXml, /<w:comment w:id="0" w:author="Gary" w:initials="LG">[\s\S]*<w:t>Comment<\/w:t>/);
+  assert.match(relsXml, /relationships\/comments" Target="comments\.xml"/);
+  assert.match(contentTypes, /PartName="\/word\/comments\.xml"/);
 });
 
 test("compact header subdocuments emit MS-DOC default/even header-footer references", async () => {
@@ -3127,4 +3435,86 @@ test("numbering level paragraph alignment from papx SPRM emitted in w:pPr/w:jc",
   const lvl0 = nXml.match(/<w:lvl w:ilvl="0"[^>]*>[\s\S]*?<\/w:lvl>/)?.[0] ?? "";
   assert.match(lvl0, /<w:pPr>/);
   assert.match(lvl0, /<w:jc w:val="left"\/>/);
+});
+
+test("sample9 parses and packages its header inline PNG from PICF", async () => {
+  const wps = readWps(await readFile("sample/sample9/original.wps"));
+  assert.equal(wps.pictures.length, 1);
+  const picture = wps.pictures[0];
+  assert.equal(picture.story, "headers");
+  assert.equal(picture.cp, 2);
+  assert.equal(picture.extension, "png");
+  assert.equal(picture.contentType, "image/png");
+  assert.equal(picture.widthTwips, 486);
+  assert.equal(picture.heightTwips, 486);
+  assert.equal(picture.shape.name, "图片 6");
+  assert.equal(picture.shape.description, "国徽1024");
+  assert.deepEqual([...picture.bytes.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  const docx = wpsToDocxBuffer(wps, { title: "sample9" });
+  const headerXml = readZipEntry(docx, "word/header1.xml").toString("utf8");
+  const footerXml = readZipEntry(docx, "word/footer1.xml").toString("utf8");
+  const headerRels = readZipEntry(docx, "word/_rels/header1.xml.rels").toString("utf8");
+  assert.match(headerXml, /<a:blip r:embed="rId1"\/>/);
+  assert.match(headerXml, /descr="国徽1024"/);
+  assert.match(headerRels, /Target="media\/image1\.png"/);
+  assert.deepEqual(readZipEntry(docx, "word/media/image1.png"), picture.bytes);
+  assert.match(footerXml, /<wp:align>outside<\/wp:align>/);
+  assert.match(footerXml, /<wps:txbx><w:txbxContent>/);
+  assert.match(footerXml, /<w:instrText xml:space="preserve"> PAGE  \\[*] MERGEFORMAT <\/w:instrText>/);
+  assert.match(footerXml, /<w:t>- 1 -<\/w:t>/);
+});
+
+test("sample11 emits its parsed PAGE textbox in the default footer", async () => {
+  const wps = readWps(await readFile("sample/sample11/original.wps"));
+  const docx = wpsToDocxBuffer(wps, { title: "sample11" });
+  const footerXml = readZipEntry(docx, "word/footer1.xml").toString("utf8");
+  assert.match(footerXml, /relativeHeight="251659264"/);
+  assert.match(footerXml, /<wp:align>center<\/wp:align>/);
+  assert.match(footerXml, /<wps:cNvSpPr txBox="1"\/>/);
+  assert.match(footerXml, /<w:t>2<\/w:t>/);
+});
+
+test("OLE SummaryInformation metadata is preserved in DOCX properties", async () => {
+  const wps = readWps(await readFile("sample/sample9/original.wps"));
+  assert.equal(wps.metadata.creator, "t");
+  assert.equal(wps.metadata.lastModifiedBy, "admin");
+  assert.equal(wps.metadata.words, 3172);
+  assert.equal(wps.metadata.customProperties[0].value, "2052-12.1.0.15712");
+
+  const docx = wpsToDocxBuffer(wps);
+  const coreXml = readZipEntry(docx, "docProps/core.xml").toString("utf8");
+  const appXml = readZipEntry(docx, "docProps/app.xml").toString("utf8");
+  const customXml = readZipEntry(docx, "docProps/custom.xml").toString("utf8");
+  assert.match(coreXml, /<dc:creator>t<\/dc:creator>/);
+  assert.match(coreXml, /<cp:lastModifiedBy>admin<\/cp:lastModifiedBy>/);
+  assert.match(coreXml, /<dcterms:created[^>]*>2021-09-11T02:41:00\.000Z<\/dcterms:created>/);
+  assert.match(appXml, /<Words>3172<\/Words>/);
+  assert.match(appXml, /<DocSecurity>0<\/DocSecurity>/);
+  assert.match(customXml, /name="KSOProductBuildVe"><vt:lpwstr>2052-12\.1\.0\.15712<\/vt:lpwstr>/);
+});
+
+test("picture border and non-empty section page-border SPRMs are semantic", () => {
+  const picture = parseSprms(Buffer.from([0x02, 0x6c, 8, 1, 2, 3]));
+  assert.equal(picture.pictureBorders.top.val, "single");
+  assert.equal(picture.pictureBorders.top.sz, "8");
+
+  const section = parseSectionSprms(Buffer.from([
+    0x2f, 0x52, 0x29, 0x00,
+    0x34, 0xd2, 0x08,
+    0xff, 0x00, 0x00, 0x00, 0x08, 0x01, 0x02, 0x00,
+  ]));
+  assert.deepEqual(section.pageBorderProperties, { display: "firstPage", zOrder: "back", offsetFrom: "page" });
+  assert.equal(section.pageBorders.top.style, "single");
+  assert.equal(section.pageBorders.top.color, "FF0000");
+  assert.equal(section.pageBorders.top.sz, "8");
+});
+
+test("compressed MS-DOC text code pages come from FibBase.lid", () => {
+  assert.equal(textDecoderEncodingForLid(0x0804), "gbk");
+  assert.equal(textDecoderEncodingForLid(0x0404), "big5");
+  assert.equal(textDecoderEncodingForLid(0x0411), "shift_jis");
+  assert.equal(textDecoderEncodingForLid(0x0419), "windows-1251");
+  assert.equal(textDecoderEncodingForLid(0x0409), "windows-1252");
+  assert.throws(() => textDecoderEncodingForLid(0x047f), /Unimplemented compressed MS-DOC text code page/);
 });

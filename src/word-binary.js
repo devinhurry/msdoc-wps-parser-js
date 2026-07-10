@@ -22,6 +22,10 @@ const FIB_FC_LCB_COUNT_OFFSET = 0x98;
 const FIB_FC_CLX_INDEX = 33;
 const FIB_FC_PLCFSED_INDEX = 6;
 const FIB_FC_PLCFHDD_INDEX = 8;
+const FIB_FC_PLCFFNDREF_INDEX = 2;
+const FIB_FC_PLCFFNDTXT_INDEX = 3;
+const FIB_FC_PLCFANDREF_INDEX = 4;
+const FIB_FC_PLCFANDTXT_INDEX = 5;
 const FIB_FC_PAPX_INDEX = 13;
 const FIB_FC_STSH_INDEX = 1;
 const FIB_FC_FONT_TABLE_INDEX = 15;
@@ -30,6 +34,13 @@ const PHE_SIZE = 12;
 const SPRM_WPS_DYA_LINE = 0x6412;
 const SPRM_WPS_DYA_LINE_OPERAND_SIZE = 2;
 const FIB_FC_CHPX_INDEX = 12;
+const FIB_FC_PLCFFLDMOM_INDEX = 16;
+const FIB_FC_PLCFFLDHDR_INDEX = 17;
+const FIB_FC_PLCFFLDFTN_INDEX = 18;
+const FIB_FC_PLCFFLDATN_INDEX = 19;
+const FIB_FC_PLCFFLDEDN_INDEX = 48;
+const FIB_FC_PLCFFLDTXBX_INDEX = 57;
+const FIB_FC_PLCFFLDHDRTXBX_INDEX = 59;
 const PNFPN_MASK = 0x003fffff;
 const FKP_PAGE_SIZE = 512;
 const FIB_FC_PLCFLST_INDEX = 73;
@@ -42,6 +53,14 @@ const FIB_FC_DOP_INDEX = 31; // 0x1F per FibRgFcLcb97
 const FIB_FC_PLCFSPAMOM_INDEX = 40;
 const FIB_FC_PLCFSPAHDR_INDEX = 41;
 const FIB_FC_DGGINFO_INDEX = 50;
+const FIB_FC_GRPXSTATNOWNERS_INDEX = 36;
+const FIB_FC_STTBFATNBKMK_INDEX = 37;
+const FIB_FC_PLCFATNBKF_INDEX = 42;
+const FIB_FC_PLCFATNBKL_INDEX = 43;
+const FIB_FC_PLCFENDREF_INDEX = 46;
+const FIB_FC_PLCFENDTXT_INDEX = 47;
+const FIB_FC_PLCFTXBXTXT_INDEX = 56;
+const FIB_FC_PLCFHDRTXBXTXT_INDEX = 58;
 const FIB_FC_STTBFRMARK_INDEX = 51; // MS-DOC-SPEC/15 FibRgFcLcb97 fcSttbfRMark at offset 0x232
 const SELSF_SIZE = 36;
 const OFFICE_ART_DGG_CONTAINER = 0xf000;
@@ -50,9 +69,18 @@ const OFFICE_ART_SPGR_CONTAINER = 0xf003;
 const OFFICE_ART_SP_CONTAINER = 0xf004;
 const OFFICE_ART_FSP = 0xf00a;
 const OFFICE_ART_FOPT = 0xf00b;
+const OFFICE_ART_BSE = 0xf007;
+const OFFICE_ART_BLIP_EMF = 0xf01a;
+const OFFICE_ART_BLIP_WMF = 0xf01b;
+const OFFICE_ART_BLIP_PICT = 0xf01c;
+const OFFICE_ART_BLIP_JPEG = 0xf01d;
+const OFFICE_ART_BLIP_PNG = 0xf01e;
+const OFFICE_ART_BLIP_DIB = 0xf01f;
+const OFFICE_ART_BLIP_TIFF = 0xf029;
 const OFFICE_ART_CLIENT_DATA = 0xf012;
 const OFFICE_ART_TERTIARY_FOPT = 0xf122;
 const OFFICE_ART_SHAPE_NAME_PID = 0x0380;
+const OFFICE_ART_SHAPE_DESCRIPTION_PID = 0x0381;
 const OFFICE_ART_GFXDATA_PID = 0x03a9;
 const WPS_DRAWING_RELATIVE_HEIGHT_BASE = 0x0f000000;
 const WPS_DRAWING_RELATIVE_HEIGHT_STEP = 0x400;
@@ -95,15 +123,42 @@ export function extractWordBinaryDocument({ wordDocument, table0, table1 = null,
   const sections = extractSections(wordDocument, tableStream, fib, bodyText);
   const listData = extractListData(tableStream, fib);
   const defaultTabStop = dop.dxaTab;
-  const plcfHdd = parsePlcfHdd(tableStream, fib);
+  const plcfHdd = parsePlcfHdd(tableStream, fib, subdocuments.headers.rawText, sections.length);
+  const fields = parseFieldTables(tableStream, fib, subdocuments);
+  const footnotes = parseNoteCollection(tableStream, fib.fcPlcffndRef, fib.lcbPlcffndRef, fib.fcPlcffndTxt, fib.lcbPlcffndTxt, bodyText, subdocuments.footnotes.rawText, "footnote");
+  const endnotes = parseNoteCollection(tableStream, fib.fcPlcfendRef, fib.lcbPlcfendRef, fib.fcPlcfendTxt, fib.lcbPlcfendTxt, bodyText, subdocuments.endnotes.rawText, "endnote");
+  const comments = parseComments(tableStream, fib, bodyText, subdocuments.annotations.rawText);
+  const textboxes = {
+    body: parseTextboxTextPlc(tableStream, fib.fcPlcftxbxTxt, fib.lcbPlcftxbxTxt, subdocuments.textboxes.rawText, "Textbox Document"),
+    headers: parseTextboxTextPlc(tableStream, fib.fcPlcfHdrtxbxTxt, fib.lcbPlcfHdrtxbxTxt, subdocuments.headerTextboxes.rawText, "Header Textbox Document"),
+  };
   const bookmarks = parseStandardBookmarks(tableStream, fib);
-  const officeArtShapes = parseOfficeArtContent(tableStream, fib);
-  const shapeAnchors = attachOfficeArtToShapeAnchors(parseMainShapeAnchors(tableStream, fib), officeArtShapes);
+  const officeArtDrawings = parseOfficeArtContent(tableStream, fib);
+  const shapeAnchors = attachOfficeArtToShapeAnchors(
+    parseShapeAnchors(tableStream, fib.fcPlcSpaMom, fib.lcbPlcSpaMom, fib.characterCounts.body, "PlcfSpaMom"),
+    officeArtDrawings.body,
+  );
+  const headerShapeAnchors = attachOfficeArtToShapeAnchors(
+    parseShapeAnchors(tableStream, fib.fcPlcSpaHdr, fib.lcbPlcSpaHdr, fib.characterCounts.headers, "PlcfSpaHdr"),
+    officeArtDrawings.headers,
+  );
   const revisionAuthors = parseRevisionAuthors(tableStream, fib);
   const lastSelection = parseLastSelection(tableStream, fib, rawText.length);
-  const paragraphProperties = extractParagraphProperties(wordDocument, tableStream, fib, bodyText, styles, pieces);
-  const characterRuns = extractCharacterRuns(wordDocument, tableStream, fib, bodyText, pieces, styles);
-  const characterProperties = expandCharacterRuns(characterRuns, bodyText.length);
+  const allParagraphPropertyEntries = extractParagraphPropertyEntries(wordDocument, tableStream, fib, rawText.length, styles, pieces);
+  const subdocumentParagraphProperties = Object.fromEntries(
+    Object.entries(subdocuments).map(([name, story]) => [name, paragraphPropertiesForStory(story, allParagraphPropertyEntries)]),
+  );
+  const paragraphProperties = subdocumentParagraphProperties.body;
+  const allCharacterRuns = extractCharacterRuns(wordDocument, tableStream, fib, rawText, pieces, styles);
+  const allCharacterProperties = expandCharacterRuns(allCharacterRuns, rawText.length);
+  const pictures = parseInlinePictures(data, subdocuments, allCharacterProperties);
+  const characterRuns = allCharacterRuns
+    .filter((run) => run.cpStart < bodyText.length && run.cpEnd > 0)
+    .map((run) => ({ ...run, cpStart: Math.max(0, run.cpStart), cpEnd: Math.min(bodyText.length, run.cpEnd) }));
+  const characterProperties = allCharacterProperties.slice(0, bodyText.length);
+  const subdocumentCharacterProperties = Object.fromEntries(
+    Object.entries(subdocuments).map(([name, story]) => [name, allCharacterProperties.slice(story.cpStart, story.cpEnd)]),
+  );
   const tableRows = extractTableRows(wordDocument, tableStream, fib, pieces, bodyText, paragraphProperties, sections, data, styles);
 
   return {
@@ -114,8 +169,11 @@ export function extractWordBinaryDocument({ wordDocument, table0, table1 = null,
     bodyText,
     paragraphs: paragraphsFromWordText(bodyText),
     paragraphProperties,
+    subdocumentParagraphProperties,
     characterProperties,
     characterRuns,
+    allCharacterRuns,
+    subdocumentCharacterProperties,
     styles,
     latentLsd,
     stiMaxWhenSaved,
@@ -127,8 +185,16 @@ export function extractWordBinaryDocument({ wordDocument, table0, table1 = null,
     subdocuments,
     tableRows,
     plcfHdd,
+    fields,
+    footnotes,
+    endnotes,
+    comments,
+    textboxes,
     bookmarks,
     shapeAnchors,
+    headerShapeAnchors,
+    officeArtDrawings,
+    pictures,
     revisionAuthors,
     lastSelection,
     dop,
@@ -172,7 +238,33 @@ function readFib(wordDocument) {
   const plcfSpaHdrOffset = FIB_FC_LCB_START + FIB_FC_PLCFSPAHDR_INDEX * 8;
   const dggInfoOffset = FIB_FC_LCB_START + FIB_FC_DGGINFO_INDEX * 8;
   const sttbfRMarkOffset = FIB_FC_LCB_START + FIB_FC_STTBFRMARK_INDEX * 8;
-  if (tableStreamOffset + 8 > FIB_FC_LCB_START + fcLcbCount * 4) {
+  const fcLcbLimit = FIB_FC_LCB_START + fcLcbCount * 4;
+  const readOptionalFcLcb = (index) => {
+    const offset = FIB_FC_LCB_START + index * 8;
+    return offset + 8 <= fcLcbLimit
+      ? { fc: wordDocument.readUInt32LE(offset), lcb: wordDocument.readUInt32LE(offset + 4) }
+      : { fc: 0, lcb: 0 };
+  };
+  const fieldMom = readOptionalFcLcb(FIB_FC_PLCFFLDMOM_INDEX);
+  const fieldHdr = readOptionalFcLcb(FIB_FC_PLCFFLDHDR_INDEX);
+  const fieldFtn = readOptionalFcLcb(FIB_FC_PLCFFLDFTN_INDEX);
+  const fieldAtn = readOptionalFcLcb(FIB_FC_PLCFFLDATN_INDEX);
+  const fieldEdn = readOptionalFcLcb(FIB_FC_PLCFFLDEDN_INDEX);
+  const fieldTxbx = readOptionalFcLcb(FIB_FC_PLCFFLDTXBX_INDEX);
+  const fieldHdrTxbx = readOptionalFcLcb(FIB_FC_PLCFFLDHDRTXBX_INDEX);
+  const footnoteRef = readOptionalFcLcb(FIB_FC_PLCFFNDREF_INDEX);
+  const footnoteText = readOptionalFcLcb(FIB_FC_PLCFFNDTXT_INDEX);
+  const annotationRef = readOptionalFcLcb(FIB_FC_PLCFANDREF_INDEX);
+  const annotationText = readOptionalFcLcb(FIB_FC_PLCFANDTXT_INDEX);
+  const annotationOwners = readOptionalFcLcb(FIB_FC_GRPXSTATNOWNERS_INDEX);
+  const annotationBookmarkNames = readOptionalFcLcb(FIB_FC_STTBFATNBKMK_INDEX);
+  const annotationBookmarkStarts = readOptionalFcLcb(FIB_FC_PLCFATNBKF_INDEX);
+  const annotationBookmarkEnds = readOptionalFcLcb(FIB_FC_PLCFATNBKL_INDEX);
+  const endnoteRef = readOptionalFcLcb(FIB_FC_PLCFENDREF_INDEX);
+  const endnoteText = readOptionalFcLcb(FIB_FC_PLCFENDTXT_INDEX);
+  const textboxText = readOptionalFcLcb(FIB_FC_PLCFTXBXTXT_INDEX);
+  const headerTextboxText = readOptionalFcLcb(FIB_FC_PLCFHDRTXBXTXT_INDEX);
+  if (tableStreamOffset + 8 > fcLcbLimit) {
     throw new Error("Unimplemented Word binary document variant: FIB does not contain fcClx/lcbClx");
   }
 
@@ -208,6 +300,44 @@ function readFib(wordDocument) {
     lcbPlcfSed: wordDocument.readUInt32LE(plcfSedOffset + 4),
     fcPlcfHdd: wordDocument.readUInt32LE(plcfHddOffset),
     lcbPlcfHdd: wordDocument.readUInt32LE(plcfHddOffset + 4),
+    fcPlcffndRef: footnoteRef.fc,
+    lcbPlcffndRef: footnoteRef.lcb,
+    fcPlcffndTxt: footnoteText.fc,
+    lcbPlcffndTxt: footnoteText.lcb,
+    fcPlcfandRef: annotationRef.fc,
+    lcbPlcfandRef: annotationRef.lcb,
+    fcPlcfandTxt: annotationText.fc,
+    lcbPlcfandTxt: annotationText.lcb,
+    fcGrpXstAtnOwners: annotationOwners.fc,
+    lcbGrpXstAtnOwners: annotationOwners.lcb,
+    fcSttbfAtnBkmk: annotationBookmarkNames.fc,
+    lcbSttbfAtnBkmk: annotationBookmarkNames.lcb,
+    fcPlcfAtnBkf: annotationBookmarkStarts.fc,
+    lcbPlcfAtnBkf: annotationBookmarkStarts.lcb,
+    fcPlcfAtnBkl: annotationBookmarkEnds.fc,
+    lcbPlcfAtnBkl: annotationBookmarkEnds.lcb,
+    fcPlcfendRef: endnoteRef.fc,
+    lcbPlcfendRef: endnoteRef.lcb,
+    fcPlcfendTxt: endnoteText.fc,
+    lcbPlcfendTxt: endnoteText.lcb,
+    fcPlcftxbxTxt: textboxText.fc,
+    lcbPlcftxbxTxt: textboxText.lcb,
+    fcPlcfHdrtxbxTxt: headerTextboxText.fc,
+    lcbPlcfHdrtxbxTxt: headerTextboxText.lcb,
+    fcPlcfFldMom: fieldMom.fc,
+    lcbPlcfFldMom: fieldMom.lcb,
+    fcPlcfFldHdr: fieldHdr.fc,
+    lcbPlcfFldHdr: fieldHdr.lcb,
+    fcPlcfFldFtn: fieldFtn.fc,
+    lcbPlcfFldFtn: fieldFtn.lcb,
+    fcPlcfFldAtn: fieldAtn.fc,
+    lcbPlcfFldAtn: fieldAtn.lcb,
+    fcPlcfFldEdn: fieldEdn.fc,
+    lcbPlcfFldEdn: fieldEdn.lcb,
+    fcPlcfFldTxbx: fieldTxbx.fc,
+    lcbPlcfFldTxbx: fieldTxbx.lcb,
+    fcPlcfFldHdrTxbx: fieldHdrTxbx.fc,
+    lcbPlcfFldHdrTxbx: fieldHdrTxbx.lcb,
     fcPapx: wordDocument.readUInt32LE(papxOffset),
     lcbPapx: wordDocument.readUInt32LE(papxOffset + 4),
     fcChpx: wordDocument.readUInt32LE(chpxOffset),
@@ -518,7 +648,8 @@ function parseDop(tableStream, fib) {
 
 function readDocumentPieces(wordDocument, tableStream, fib) {
   if (fib.fComplex) {
-    return readPieceTable(tableStream, fib.fcClx, fib.lcbClx);
+    const encoding = textDecoderEncodingForLid(fib.lid);
+    return readPieceTable(tableStream, fib.fcClx, fib.lcbClx).map((piece) => piece.compressed ? { ...piece, encoding } : piece);
   }
   return readNonComplexPieces(wordDocument, tableStream, fib);
 }
@@ -782,7 +913,7 @@ function readPieces(wordDocument, pieces, cpStart = 0, cpEnd = Infinity) {
       const startByte = piece.fileOffset + characterOffset;
       const endByte = startByte + characterLength;
       assertRange(wordDocument, startByte, endByte, "compressed text piece");
-      text += decodeSingleByteText(wordDocument.subarray(startByte, endByte));
+      text += decodeSingleByteText(wordDocument.subarray(startByte, endByte), piece.encoding);
     } else {
       const startByte = piece.fileOffset + characterOffset * 2;
       const endByte = startByte + characterLength * 2;
@@ -815,34 +946,434 @@ function assertRange(buffer, start, end, label) {
   }
 }
 
-function decodeSingleByteText(buffer) {
-  return new TextDecoder("windows-1252", { fatal: false }).decode(buffer);
+function decodeSingleByteText(buffer, encoding) {
+  if (!encoding) throw new Error("Invalid compressed text piece: missing parsed LID code page");
+  return new TextDecoder(encoding, { fatal: false }).decode(buffer);
 }
 
-function parsePlcfHdd(tableStream, fib) {
-  // PlcfHdd is a PLC (CP array, no data entries) in the table stream.
-  // It indexes stories in the header subdocument:
-  //   First 0-6 entries: footnote/endnote separators
-  //   Then groups of up to 6 entries per section (even/odd header/footer, first header/footer)
-  if (!fib.fcPlcfHdd || !fib.lcbPlcfHdd || fib.lcbPlcfHdd < 4) {
-    return { cpArray: [], separatorCount: 6 };
+export function textDecoderEncodingForLid(lid) {
+  // FibBase.lid identifies the language of the document. MS-DOC compressed
+  // pieces use that language's Windows ANSI code page; this explicit table is
+  // the Windows LCID/ANSI-code-page mapping, not a byte-content guess.
+  // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/
+  const exact = new Map([
+    [0x0404, "big5"], [0x0c04, "big5"], [0x1404, "big5"], [0x7c04, "big5"],
+    [0x0804, "gbk"], [0x1004, "gbk"], [0x0004, "gbk"], [0x7804, "gbk"],
+  ]);
+  if (exact.has(lid)) return exact.get(lid);
+  const primary = lid & 0x03ff;
+  if (primary === 0x11) return "shift_jis";
+  if (primary === 0x12) return "euc-kr";
+  if (primary === 0x1e) return "windows-874";
+  if (primary === 0x0d) return "windows-1255";
+  if ([0x01, 0x20, 0x29].includes(primary)) return "windows-1256";
+  if ([0x02, 0x19, 0x22, 0x23, 0x28, 0x2f, 0x3f, 0x40, 0x44].includes(primary)) return "windows-1251";
+  if (primary === 0x08) return "windows-1253";
+  if ([0x1f, 0x2c].includes(primary)) return "windows-1254";
+  if ([0x25, 0x26, 0x27].includes(primary)) return "windows-1257";
+  if (primary === 0x2a) return "windows-1258";
+  if ([0x05, 0x0e, 0x15, 0x18, 0x1a, 0x1b, 0x1c, 0x24].includes(primary)) return "windows-1250";
+  if ([0x03, 0x06, 0x07, 0x09, 0x0a, 0x0b, 0x0c, 0x0f, 0x10, 0x13, 0x14, 0x16, 0x17, 0x1d, 0x21, 0x2d, 0x36, 0x38, 0x3a, 0x3b, 0x3c, 0x3e, 0x41, 0x45, 0x46, 0x4a, 0x52, 0x56, 0x60, 0x61, 0x62, 0x64].includes(primary)) return "windows-1252";
+  throw new Error(`Unimplemented compressed MS-DOC text code page for FibBase.lid 0x${lid.toString(16)}`);
+}
+
+export function parseNoteReferencePlc(tableStream, fc, lcb, bodyText, label = "note") {
+  if (!lcb) return { cpArray: [], references: [] };
+  if (lcb < 4 || (lcb - 4) % 6 !== 0) {
+    throw new Error(`Invalid Word binary document: ${label} reference PLC length ${lcb} is not 6n+4 bytes`);
   }
-  if (fib.fcPlcfHdd + fib.lcbPlcfHdd > tableStream.length) {
-    return { cpArray: [], separatorCount: 6 };
+  assertTableRange(tableStream, fc, lcb, `${label} reference PLC`);
+  const count = (lcb - 4) / 6;
+  const cpBytes = (count + 1) * 4;
+  const cpArray = Array.from({ length: count + 1 }, (_, index) => tableStream.readUInt32LE(fc + index * 4));
+  for (let i = 1; i < cpArray.length; i += 1) {
+    if (cpArray[i] <= cpArray[i - 1]) throw new Error(`Out-of-spec ${label} reference PLC has duplicate or descending CP at index ${i}`);
   }
+  const references = Array.from({ length: count }, (_, index) => {
+    const cp = cpArray[index];
+    if (cp >= bodyText.length) throw new Error(`Out-of-spec ${label} reference CP ${cp} exceeds main document`);
+    const indexValue = tableStream.readUInt16LE(fc + cpBytes + index * 2);
+    if (indexValue !== 0 && bodyText.charCodeAt(cp) !== 0x02) {
+      throw new Error(`Out-of-spec automatic ${label} reference at CP ${cp} is not character 0x02`);
+    }
+    return { id: index + 1, cp, indexValue, automatic: indexValue !== 0 };
+  });
+  return { cpArray, references };
+}
+
+export function parseNoteTextPlc(tableStream, fc, lcb, storyText, expectedCount, label = "note") {
+  if (!lcb) {
+    if (storyText.length || expectedCount) throw new Error(`Invalid Word binary document: missing ${label} text PLC`);
+    return { cpArray: [], stories: [] };
+  }
+  if (lcb < 8 || lcb % 4 !== 0) throw new Error(`Invalid Word binary document: malformed ${label} text PLC length ${lcb}`);
+  assertTableRange(tableStream, fc, lcb, `${label} text PLC`);
+  const cpArray = Array.from({ length: lcb / 4 }, (_, index) => tableStream.readUInt32LE(fc + index * 4));
+  for (let i = 1; i < cpArray.length; i += 1) {
+    if (cpArray[i] <= cpArray[i - 1]) throw new Error(`Out-of-spec ${label} text PLC has duplicate or descending CP at index ${i}`);
+  }
+  const storyCount = cpArray.length - 2;
+  if (storyCount !== expectedCount) throw new Error(`Invalid Word binary document: ${label} reference/text count mismatch (${expectedCount} vs ${storyCount})`);
+  if (cpArray.at(-2) !== storyText.length - 1) {
+    throw new Error(`Out-of-spec ${label} text PLC penultimate CP ${cpArray.at(-2)} does not equal story length minus one ${storyText.length - 1}`);
+  }
+  const stories = Array.from({ length: storyCount }, (_, index) => {
+    const cpStart = cpArray[index];
+    const cpEnd = cpArray[index + 1];
+    if (cpEnd > storyText.length || cpStart >= cpEnd || storyText[cpEnd - 1] !== "\r") {
+      throw new Error(`Out-of-spec ${label} text range ${index} does not end with a paragraph mark`);
+    }
+    const rawText = storyText.slice(cpStart, cpEnd);
+    return { id: index + 1, cpStart, cpEnd, rawText, text: rawText.slice(0, -1) };
+  });
+  return { cpArray, stories };
+}
+
+function parseNoteCollection(tableStream, refFc, refLcb, textFc, textLcb, bodyText, storyText, label) {
+  const references = parseNoteReferencePlc(tableStream, refFc, refLcb, bodyText, label);
+  const texts = parseNoteTextPlc(tableStream, textFc, textLcb, storyText, references.references.length, label);
+  return {
+    references: references.references.map((reference, index) => ({ ...reference, story: texts.stories[index] })),
+    stories: texts.stories,
+    referenceCpArray: references.cpArray,
+    textCpArray: texts.cpArray,
+  };
+}
+
+export function parseTextboxTextPlc(tableStream, fc, lcb, storyText, label = "Textbox Document") {
+  if (!lcb) {
+    if (storyText.length) throw new Error(`Invalid Word binary document: missing ${label} text PLC`);
+    return { cpArray: [], entries: [] };
+  }
+  if (lcb < 30 || (lcb - 4) % 26 !== 0) throw new Error(`Invalid Word binary document: malformed ${label} PLC length ${lcb}`);
+  assertTableRange(tableStream, fc, lcb, `${label} PLC`);
+  const count = (lcb - 4) / 26;
+  const cpBytes = (count + 1) * 4;
+  const cpArray = Array.from({ length: count + 1 }, (_, index) => tableStream.readUInt32LE(fc + index * 4));
+  for (let i = 1; i < cpArray.length; i += 1) {
+    if (cpArray[i] <= cpArray[i - 1]) throw new Error(`Out-of-spec ${label} PLC has duplicate or descending CP at index ${i}`);
+  }
+  const entries = Array.from({ length: count }, (_, index) => {
+    const off = fc + cpBytes + index * 22;
+    const fReusableRaw = tableStream.readUInt16LE(off + 8);
+    const isLast = index === count - 1;
+    const reusable = isLast || fReusableRaw !== 0;
+    if (fReusableRaw !== 0 && (fReusableRaw & 1) === 0) throw new Error(`Out-of-spec ${label} FTXBXS ${index} has invalid fReusable`);
+    const cpStart = cpArray[index];
+    const cpEnd = cpArray[index + 1];
+    const lid = tableStream.readUInt32LE(off + 14);
+    const entry = {
+      index,
+      cpStart,
+      cpEnd,
+      reusable,
+      fReusableRaw,
+      itxbxsDest: tableStream.readUInt32LE(off + 10),
+      lid,
+      txidUndo: tableStream.readUInt32LE(off + 18),
+      cTxbx: tableStream.readUInt32LE(off),
+      cTxbxEdit: tableStream.readUInt32LE(off + 4),
+      rawText: storyText.slice(cpStart, Math.min(cpEnd, storyText.length)),
+    };
+    if (entry.txidUndo !== 0) throw new Error(`Out-of-spec ${label} FTXBXS ${index} has nonzero txidUndo`);
+    if (reusable) {
+      if ((!isLast && cpEnd - cpStart !== 1) || lid !== 0) throw new Error(`Out-of-spec ${label} reusable FTXBXS ${index}`);
+    } else {
+      if (cpEnd - cpStart <= 1 || cpEnd > storyText.length || storyText[cpEnd - 1] !== "\r") {
+        throw new Error(`Out-of-spec ${label} textbox range ${index}`);
+      }
+      if (entry.cTxbx <= 0 || entry.cTxbxEdit !== 0 || lid === 0) throw new Error(`Out-of-spec ${label} actual FTXBXS ${index}`);
+      entry.text = entry.rawText.slice(0, -1);
+    }
+    return entry;
+  });
+  return { cpArray, entries, textboxes: entries.filter((entry) => !entry.reusable) };
+}
+
+function parseCommentAuthors(tableStream, fib) {
+  if (!fib.lcbGrpXstAtnOwners) return [];
+  assertTableRange(tableStream, fib.fcGrpXstAtnOwners, fib.lcbGrpXstAtnOwners, "comment author XST array");
+  const end = fib.fcGrpXstAtnOwners + fib.lcbGrpXstAtnOwners;
+  const authors = [];
+  let off = fib.fcGrpXstAtnOwners;
+  while (off < end) {
+    if (off + 2 > end) throw new Error("Invalid Word binary document: truncated comment author XST");
+    const cch = tableStream.readUInt16LE(off);
+    if (cch >= 56 || off + 2 + cch * 2 > end) throw new Error("Out-of-spec comment author XST");
+    authors.push(tableStream.subarray(off + 2, off + 2 + cch * 2).toString("utf16le"));
+    off += 2 + cch * 2;
+  }
+  if (new Set(authors).size !== authors.length) throw new Error("Out-of-spec duplicate comment author names");
+  return authors;
+}
+
+function parseAnnotationBookmarks(tableStream, fib) {
+  if (!fib.lcbSttbfAtnBkmk && !fib.lcbPlcfAtnBkf && !fib.lcbPlcfAtnBkl) return new Map();
+  if (!fib.lcbSttbfAtnBkmk || !fib.lcbPlcfAtnBkf || !fib.lcbPlcfAtnBkl) throw new Error("Invalid Word binary document: incomplete annotation bookmark tables");
+  assertTableRange(tableStream, fib.fcSttbfAtnBkmk, fib.lcbSttbfAtnBkmk, "SttbfAtnBkmk");
+  const sttb = tableStream.subarray(fib.fcSttbfAtnBkmk, fib.fcSttbfAtnBkmk + fib.lcbSttbfAtnBkmk);
+  if (sttb.length < 6 || sttb.readUInt16LE(0) !== 0xffff || sttb.readUInt16LE(4) !== 10) throw new Error("Out-of-spec SttbfAtnBkmk header");
+  const count = sttb.readUInt16LE(2);
+  const tags = [];
+  let off = 6;
+  for (let i = 0; i < count; i += 1) {
+    if (off + 12 > sttb.length || sttb.readUInt16LE(off) !== 0) throw new Error("Out-of-spec SttbfAtnBkmk entry");
+    const bmc = sttb.readUInt16LE(off + 2);
+    const lTag = sttb.readUInt32LE(off + 4);
+    const lTagOld = sttb.readInt32LE(off + 8);
+    if (bmc !== 0x0100 || lTagOld !== -1) throw new Error("Out-of-spec annotation ATNBE");
+    tags.push(lTag);
+    off += 12;
+  }
+  if (off !== sttb.length || new Set(tags).size !== tags.length) throw new Error("Out-of-spec SttbfAtnBkmk length or duplicate lTag");
+  if (fib.lcbPlcfAtnBkl !== (count + 1) * 4) throw new Error("Invalid annotation Plcfbkl length");
+  const dataBytes = fib.lcbPlcfAtnBkf - (count + 1) * 4;
+  if (dataBytes !== count * 4) throw new Error("Invalid annotation Plcfbkf length");
+  const bkf = tableStream.subarray(fib.fcPlcfAtnBkf, fib.fcPlcfAtnBkf + fib.lcbPlcfAtnBkf);
+  const bkl = tableStream.subarray(fib.fcPlcfAtnBkl, fib.fcPlcfAtnBkl + fib.lcbPlcfAtnBkl);
+  const starts = readBookmarkPlcCps(bkf, count, "annotation Plcfbkf");
+  const ends = readBookmarkPlcCps(bkl, count, "annotation Plcfbkl");
+  const map = new Map();
+  for (let i = 0; i < count; i += 1) {
+    const ibkl = bkf.readUInt16LE((count + 1) * 4 + i * 4);
+    parseBkc(bkf.readUInt16LE((count + 1) * 4 + i * 4 + 2), `annotation ${tags[i]}`);
+    if (ibkl >= count || starts[i] > ends[ibkl]) throw new Error("Out-of-spec annotation bookmark linkage");
+    map.set(tags[i], { cpStart: starts[i], cpEnd: ends[ibkl] });
+  }
+  return map;
+}
+
+export function parseComments(tableStream, fib, bodyText, storyText) {
+  if (!fib.lcbPlcfandRef && !fib.lcbPlcfandTxt) {
+    if (storyText.length) throw new Error("Invalid Word binary document: comment story exists without comment PLCs");
+    return { comments: [], authors: [] };
+  }
+  if (!fib.lcbPlcfandRef || !fib.lcbPlcfandTxt) throw new Error("Invalid Word binary document: incomplete comment PLCs");
+  const authors = parseCommentAuthors(tableStream, fib);
+  const bookmarks = parseAnnotationBookmarks(tableStream, fib);
+  if (fib.lcbPlcfandRef < 4 || (fib.lcbPlcfandRef - 4) % 34 !== 0) throw new Error("Invalid comment reference PLC length");
+  assertTableRange(tableStream, fib.fcPlcfandRef, fib.lcbPlcfandRef, "comment reference PLC");
+  const count = (fib.lcbPlcfandRef - 4) / 34;
+  const cpBytes = (count + 1) * 4;
+  const cps = Array.from({ length: count + 1 }, (_, index) => tableStream.readUInt32LE(fib.fcPlcfandRef + index * 4));
+  for (let i = 1; i < cps.length; i += 1) if (cps[i] <= cps[i - 1]) throw new Error("Out-of-spec comment reference CP array");
+  const textPlc = parseNoteTextPlc(tableStream, fib.fcPlcfandTxt, fib.lcbPlcfandTxt, storyText, count, "comment");
+  const comments = Array.from({ length: count }, (_, index) => {
+    const cp = cps[index];
+    if (cp >= bodyText.length || bodyText.charCodeAt(cp) !== 0x05) throw new Error(`Out-of-spec comment reference at CP ${cp}`);
+    const off = fib.fcPlcfandRef + cpBytes + index * 30;
+    const cch = tableStream.readUInt16LE(off);
+    if (cch > 9) throw new Error("Out-of-spec comment initials");
+    const initials = tableStream.subarray(off + 2, off + 2 + cch * 2).toString("utf16le");
+    const ibst = tableStream.readUInt16LE(off + 20);
+    if (ibst >= authors.length) throw new Error(`Out-of-spec comment author index ${ibst}`);
+    if (tableStream.readUInt16LE(off + 22) !== 0 || tableStream.readUInt16LE(off + 24) !== 0) throw new Error("Out-of-spec comment ATRD reserved fields");
+    const lTagBkmk = tableStream.readInt32LE(off + 26);
+    const range = lTagBkmk === -1 ? { cpStart: cp, cpEnd: cp } : bookmarks.get(lTagBkmk);
+    if (!range) throw new Error(`Invalid comment annotation bookmark tag ${lTagBkmk}`);
+    const story = textPlc.stories[index];
+    if (story.text.charCodeAt(0) !== 0x05) throw new Error(`Out-of-spec comment text ${index} does not begin with 0x05`);
+    return { id: index, cp, initials, author: authors[ibst], authorIndex: ibst, lTagBkmk, ...range, story: { ...story, text: story.text.slice(1), rawText: story.rawText.slice(1) } };
+  });
+  return { comments, authors, referenceCpArray: cps, textCpArray: textPlc.cpArray };
+}
+
+function parseFieldTables(tableStream, fib, subdocuments) {
+  return {
+    body: parseFieldPlc(tableStream, fib.fcPlcfFldMom, fib.lcbPlcfFldMom, subdocuments.body.rawText, "Main Document"),
+    headers: parseFieldPlc(tableStream, fib.fcPlcfFldHdr, fib.lcbPlcfFldHdr, subdocuments.headers.rawText, "Header Document"),
+    footnotes: parseFieldPlc(tableStream, fib.fcPlcfFldFtn, fib.lcbPlcfFldFtn, subdocuments.footnotes.rawText, "Footnote Document"),
+    annotations: parseFieldPlc(tableStream, fib.fcPlcfFldAtn, fib.lcbPlcfFldAtn, subdocuments.annotations.rawText, "Comment Document"),
+    endnotes: parseFieldPlc(tableStream, fib.fcPlcfFldEdn, fib.lcbPlcfFldEdn, subdocuments.endnotes.rawText, "Endnote Document"),
+    textboxes: parseFieldPlc(tableStream, fib.fcPlcfFldTxbx, fib.lcbPlcfFldTxbx, subdocuments.textboxes.rawText, "Textbox Document"),
+    headerTextboxes: parseFieldPlc(tableStream, fib.fcPlcfFldHdrTxbx, fib.lcbPlcfFldHdrTxbx, subdocuments.headerTextboxes.rawText, "Header Textbox Document"),
+  };
+}
+
+export function parseFieldPlc(tableStream, fc, lcb, storyText = "", label = "document part") {
+  // MS-DOC-SPEC/18 Plcfld is a PLC with 4-byte CPs and 2-byte Fld records:
+  // lcb = 4 * (recordCount + 1) + 2 * recordCount. The terminal CP is
+  // deliberately not interpreted as a character position; the specification
+  // defines it as sorted/largest but otherwise undefined.
+  if (!lcb) return { cpArray: [], records: [], fields: [] };
+  if (lcb < 4 || (lcb - 4) % 6 !== 0) {
+    throw new Error(`Invalid Word binary document: ${label} Plcfld length ${lcb} is not 6n+4 bytes`);
+  }
+  assertTableRange(tableStream, fc, lcb, `${label} Plcfld`);
+  const recordCount = (lcb - 4) / 6;
+  const cpBytes = (recordCount + 1) * 4;
+  const cpArray = Array.from({ length: recordCount + 1 }, (_, index) => tableStream.readUInt32LE(fc + index * 4));
+  for (let i = 1; i < cpArray.length; i += 1) {
+    if (cpArray[i] <= cpArray[i - 1]) {
+      throw new Error(`Out-of-spec ${label} Plcfld CP array is not strictly ascending at index ${i}`);
+    }
+  }
+
+  const records = [];
+  const fields = [];
+  const stack = [];
+  for (let i = 0; i < recordCount; i += 1) {
+    const cp = cpArray[i];
+    if (cp < 0 || cp >= storyText.length) {
+      throw new Error(`Out-of-spec ${label} Plcfld field CP ${cp} exceeds story character range ${storyText.length}`);
+    }
+    const fldOffset = fc + cpBytes + i * 2;
+    const fldch = tableStream[fldOffset];
+    const ch = fldch & 0x1f;
+    const grffld = tableStream[fldOffset + 1];
+    if (ch !== 0x13 && ch !== 0x14 && ch !== 0x15) {
+      throw new Error(`Out-of-spec ${label} Plcfld Fld ${i} has fldch ${ch}`);
+    }
+    if (storyText.charCodeAt(cp) !== ch) {
+      throw new Error(`Out-of-spec ${label} Plcfld Fld ${i} does not match story character at CP ${cp}`);
+    }
+    const record = { index: i, cp, fldch, ch, grffld };
+    records.push(record);
+
+    if (ch === 0x13) {
+      record.fieldType = grffld;
+      const field = { begin: record, separator: null, end: null, nested: stack.length > 0 };
+      fields.push(field);
+      stack.push(field);
+      continue;
+    }
+    if (ch === 0x14) {
+      if (!stack.length) {
+        throw new Error(`Out-of-spec ${label} Plcfld separator at CP ${cp} has no open field`);
+      }
+      const field = stack.at(-1);
+      if (field.separator) {
+        throw new Error(`Out-of-spec ${label} Plcfld field beginning at CP ${field.begin.cp} has multiple separators`);
+      }
+      field.separator = record;
+      record.field = field;
+      continue;
+    }
+    if (!stack.length) {
+      throw new Error(`Out-of-spec ${label} Plcfld end at CP ${cp} has no open field`);
+    }
+    const field = stack.pop();
+    field.end = record;
+    record.field = field;
+    record.endFlags = {
+      differ: (grffld & 0x01) !== 0,
+      zombieEmbed: (grffld & 0x02) !== 0,
+      resultsDirty: (grffld & 0x04) !== 0,
+      resultsEdited: (grffld & 0x08) !== 0,
+      locked: (grffld & 0x10) !== 0,
+      privateResult: (grffld & 0x20) !== 0,
+      nested: (grffld & 0x40) !== 0,
+      hasSeparator: (grffld & 0x80) !== 0,
+    };
+    if (record.endFlags.hasSeparator !== Boolean(field.separator)) {
+      throw new Error(`Out-of-spec ${label} Plcfld end at CP ${cp} has inconsistent fHasSep`);
+    }
+    if (record.endFlags.nested !== field.nested) {
+      throw new Error(`Out-of-spec ${label} Plcfld end at CP ${cp} has inconsistent fNested`);
+    }
+    field.begin.field = field;
+    field.begin.endFlags = record.endFlags;
+  }
+  if (stack.length) {
+    throw new Error(`Out-of-spec ${label} Plcfld contains ${stack.length} unterminated field(s)`);
+  }
+  return { cpArray, records, fields };
+}
+
+export function parsePlcfHdd(tableStream, fib, headerText = "", sectionCount = null) {
+  // MS-DOC-SPEC/13 Headers: PlcfHdd is a PLC containing only CPs. The first
+  // six ranges are note separator stories, followed by exactly six
+  // header/footer stories per section in this order: even header, odd header,
+  // even footer, odd footer, first header, first footer.
+  if (!fib.lcbPlcfHdd) {
+    return { cpArray: [], separatorCount: 6, stories: [], sections: [] };
+  }
+  if (fib.lcbPlcfHdd < 8 || fib.lcbPlcfHdd % 4 !== 0) {
+    throw new Error(`Invalid Word binary document: PlcfHdd length ${fib.lcbPlcfHdd} is not a CP PLC`);
+  }
+  assertTableRange(tableStream, fib.fcPlcfHdd, fib.lcbPlcfHdd, "PlcfHdd");
 
   const plcf = tableStream.subarray(fib.fcPlcfHdd, fib.fcPlcfHdd + fib.lcbPlcfHdd);
-  const cpCount = fib.lcbPlcfHdd / 4;
-  if (cpCount < 2) {
-    return { cpArray: [], separatorCount: 6 };
+  const cpArray = [];
+  for (let off = 0; off < plcf.length; off += 4) {
+    cpArray.push(plcf.readUInt32LE(off));
+  }
+  if (cpArray[0] !== 0) {
+    throw new Error(`Out-of-spec PlcfHdd first CP ${cpArray[0]} is not zero`);
+  }
+  for (let i = 1; i < cpArray.length; i += 1) {
+    if (cpArray[i] < cpArray[i - 1]) {
+      throw new Error(`Out-of-spec PlcfHdd CP array is not ascending at index ${i}`);
+    }
   }
 
-  const cpArray = [];
-  for (let i = 0; i < cpCount; i += 1) {
-    cpArray.push(plcf.readUInt32LE(i * 4));
+  const headerCharacterCount = fib.characterCounts?.headers ?? headerText.length;
+  if (cpArray.at(-1) !== headerCharacterCount) {
+    throw new Error(`Out-of-spec PlcfHdd final CP ${cpArray.at(-1)} does not equal ccpHdd ${headerCharacterCount}`);
   }
-  // MS-DOC: the first 6 separators (footnote/endnote) always exist
-  return { cpArray, separatorCount: 6 };
+  if (headerText.length !== headerCharacterCount) {
+    throw new Error(`Invalid Word binary document: header story text length ${headerText.length} does not equal ccpHdd ${headerCharacterCount}`);
+  }
+
+  const storyCount = cpArray.length - 1;
+  if (storyCount < 6 || (storyCount - 6) % 6 !== 0) {
+    throw new Error(`Out-of-spec PlcfHdd story count ${storyCount} is not six separators plus six stories per section`);
+  }
+  const parsedSectionCount = (storyCount - 6) / 6;
+  if (sectionCount != null && parsedSectionCount !== sectionCount) {
+    throw new Error(`Out-of-spec PlcfHdd has ${parsedSectionCount} section groups, expected ${sectionCount}`);
+  }
+
+  const separatorKinds = [
+    "footnoteSeparator",
+    "footnoteContinuationSeparator",
+    "footnoteContinuationNotice",
+    "endnoteSeparator",
+    "endnoteContinuationSeparator",
+    "endnoteContinuationNotice",
+  ];
+  const sectionKinds = [
+    "evenHeader",
+    "defaultHeader",
+    "evenFooter",
+    "defaultFooter",
+    "firstHeader",
+    "firstFooter",
+  ];
+  const stories = [];
+  for (let i = 0; i < storyCount; i += 1) {
+    const cpStart = cpArray[i];
+    const cpEnd = cpArray[i + 1];
+    const rawText = headerText.slice(cpStart, cpEnd);
+    if (rawText && !rawText.endsWith("\r")) {
+      throw new Error(`Out-of-spec PlcfHdd story ${i} is non-empty without a guard paragraph mark`);
+    }
+    const sectionIndex = i < 6 ? null : Math.floor((i - 6) / 6);
+    const kind = i < 6 ? separatorKinds[i] : sectionKinds[(i - 6) % 6];
+    stories.push({
+      index: i,
+      kind,
+      sectionIndex,
+      cpStart,
+      cpEnd,
+      rawText,
+      // The final paragraph mark is a story guard and is not part of the
+      // header/footer content (MS-DOC-SPEC/13 Headers).
+      text: rawText ? rawText.slice(0, -1) : "",
+      empty: cpStart === cpEnd,
+    });
+  }
+
+  return {
+    cpArray,
+    separatorCount: 6,
+    stories,
+    separators: stories.slice(0, 6),
+    sections: Array.from({ length: parsedSectionCount }, (_, sectionIndex) => {
+      const group = stories.slice(6 + sectionIndex * 6, 12 + sectionIndex * 6);
+      return Object.fromEntries(group.map((story) => [story.kind, story]));
+    }),
+  };
 }
 
 function parseStandardBookmarks(tableStream, fib) {
@@ -1000,8 +1531,239 @@ function assertTableRange(tableStream, fc, lcb, label) {
   }
 }
 
+function parseInlinePictures(data, subdocuments, allCharacterProperties) {
+  const pictures = [];
+  const parsedByLocation = new Map();
+  for (const [storyName, story] of Object.entries(subdocuments)) {
+    for (let localCp = 0; localCp < story.rawText.length; localCp += 1) {
+      if (story.rawText.charCodeAt(localCp) !== 0x0001) continue;
+      const globalCp = story.cpStart + localCp;
+      const properties = allCharacterProperties[globalCp] ?? {};
+      if (!Number.isInteger(properties.pictureLocation)) {
+        throw new Error(`Out-of-spec picture character in ${storyName} at CP ${localCp}: missing sprmCPicLocation`);
+      }
+      if (properties.specialCharacter !== true) {
+        throw new Error(`Out-of-spec picture character in ${storyName} at CP ${localCp}: sprmCFSpec is not set`);
+      }
+      if (properties.binaryData) {
+        throw new Error(`Excluded binary-data picture character in ${storyName} at CP ${localCp}`);
+      }
+      if (properties.ole2 || properties.embeddedObject) {
+        throw new Error(`Excluded OLE object picture character in ${storyName} at CP ${localCp}`);
+      }
+      if (!data) {
+        throw new Error(`Invalid Word binary document: picture character in ${storyName} references a missing Data stream`);
+      }
+      let picture = parsedByLocation.get(properties.pictureLocation);
+      if (!picture) {
+        picture = parsePicfAndOfficeArtData(data, properties.pictureLocation);
+        parsedByLocation.set(properties.pictureLocation, picture);
+      }
+      pictures.push({
+        ...picture,
+        borders: { ...picture.borders, ...(properties.pictureBorders ?? {}) },
+        story: storyName,
+        cp: localCp,
+        globalCp,
+        properties,
+      });
+    }
+  }
+  return pictures;
+}
+
+export function parsePicfAndOfficeArtData(data, offset = 0) {
+  if (!Buffer.isBuffer(data)) data = Buffer.from(data ?? []);
+  if (!Number.isInteger(offset) || offset < 0 || offset + 68 > data.length) {
+    throw new Error(`Invalid PICFAndOfficeArtData offset ${offset}`);
+  }
+  const lcb = data.readInt32LE(offset);
+  if (lcb < 68 || offset + lcb > data.length) {
+    throw new Error(`Out-of-spec PICF length ${lcb} at Data offset ${offset}`);
+  }
+  const end = offset + lcb;
+  const cbHeader = data.readUInt16LE(offset + 4);
+  if (cbHeader !== 0x44) {
+    throw new Error(`Out-of-spec PICF.cbHeader 0x${cbHeader.toString(16)}`);
+  }
+  const mm = data.readInt16LE(offset + 6);
+  if (mm !== 0x0064 && mm !== 0x0066) {
+    throw new Error(`Out-of-spec PICF MFPF.mm 0x${(mm & 0xffff).toString(16)}`);
+  }
+  if (data.readUInt16LE(offset + 12) !== 0) {
+    throw new Error("Out-of-spec PICF MFPF.swHMF must be zero");
+  }
+  if (data.readUInt32LE(offset + 18) !== 0 || data.readUInt32LE(offset + 24) !== 0) {
+    throw new Error("Out-of-spec PICF_Shape padding must be zero");
+  }
+  const dxaGoal = data.readInt16LE(offset + 28);
+  const dyaGoal = data.readInt16LE(offset + 30);
+  const mx = data.readUInt16LE(offset + 32);
+  const my = data.readUInt16LE(offset + 34);
+  if (dxaGoal <= 0 || dyaGoal <= 0) {
+    throw new Error(`Out-of-spec PICMID goal size ${dxaGoal}x${dyaGoal}`);
+  }
+  for (const reservedOffset of [36, 38, 40, 42, 62, 64]) {
+    if (data.readInt16LE(offset + reservedOffset) !== 0) {
+      throw new Error(`Out-of-spec PICMID reserved field at offset ${reservedOffset}`);
+    }
+  }
+  if (data[offset + 44] !== 0) {
+    throw new Error("Out-of-spec PICMID.fReserved must be zero");
+  }
+  if (data.readUInt16LE(offset + 66) !== 0) {
+    throw new Error("Out-of-spec PICF.cProps must be zero");
+  }
+
+  let pictureOffset = offset + cbHeader;
+  let sourceName = null;
+  if (mm === 0x0066) {
+    if (pictureOffset >= end) throw new Error("Invalid PICF shape-file name");
+    const cchPicName = data[pictureOffset++];
+    if (pictureOffset + cchPicName > end) throw new Error("Invalid PICF shape-file name length");
+    sourceName = data.subarray(pictureOffset, pictureOffset + cchPicName).toString("latin1");
+    pictureOffset += cchPicName;
+  }
+
+  const shapeRecord = readOfficeArtRecord(data, pictureOffset, end);
+  if (shapeRecord.type !== OFFICE_ART_SP_CONTAINER || shapeRecord.ver !== 0x0f) {
+    throw new Error(`Out-of-spec OfficeArtInlineSpContainer shape record 0x${shapeRecord.type.toString(16)}`);
+  }
+  const shape = parseOfficeArtShapeContainer(data, shapeRecord);
+  const bseRecord = readOfficeArtRecord(data, shapeRecord.end, end);
+  if (bseRecord.type !== OFFICE_ART_BSE || bseRecord.ver !== 0x02) {
+    throw new Error(`Out-of-spec OfficeArtInlineSpContainer BSE record 0x${bseRecord.type.toString(16)}`);
+  }
+  if (bseRecord.end !== end) {
+    throw new Error("Out-of-spec PICFAndOfficeArtData has trailing bytes after OfficeArtBSE");
+  }
+  const image = parseOfficeArtBse(data, bseRecord);
+  const widthTwips = Math.round(dxaGoal * mx / 1000);
+  const heightTwips = Math.round(dyaGoal * my / 1000);
+  if (widthTwips < 15 || widthTwips > 31680 || heightTwips < 15 || heightTwips > 31680) {
+    throw new Error(`Out-of-spec PICMID display size ${widthTwips}x${heightTwips} twips`);
+  }
+  return {
+    dataOffset: offset,
+    byteLength: lcb,
+    sourceName,
+    dxaGoal,
+    dyaGoal,
+    mx,
+    my,
+    widthTwips,
+    heightTwips,
+    borders: {
+      top: parseBrc80Raw(data[offset + 46], data[offset + 47], data[offset + 48], data[offset + 49] & 0x1f),
+      left: parseBrc80Raw(data[offset + 50], data[offset + 51], data[offset + 52], data[offset + 53] & 0x1f),
+      bottom: parseBrc80Raw(data[offset + 54], data[offset + 55], data[offset + 56], data[offset + 57] & 0x1f),
+      right: parseBrc80Raw(data[offset + 58], data[offset + 59], data[offset + 60], data[offset + 61] & 0x1f),
+    },
+    shape,
+    ...image,
+  };
+}
+
+function parseOfficeArtBse(buffer, record) {
+  if (record.len < 36) throw new Error("Out-of-spec OfficeArtBSE is shorter than 36 bytes");
+  const off = record.content;
+  const btWin32 = buffer[off];
+  const btMacOS = buffer[off + 1];
+  const cb = buffer.readUInt32LE(off + 20);
+  const cRef = buffer.readUInt32LE(off + 24);
+  const foDelay = buffer.readUInt32LE(off + 28);
+  const usage = buffer[off + 32];
+  const cbName = buffer[off + 33];
+  if (buffer[off + 34] !== 0 || buffer[off + 35] !== 0) {
+    throw new Error("Out-of-spec OfficeArtBSE unused fields must be zero");
+  }
+  const nameEnd = off + 36 + cbName;
+  if (nameEnd > record.end) throw new Error("Invalid OfficeArtBSE name length");
+  if (foDelay !== 0) {
+    throw new Error(`Unimplemented delayed OfficeArt blip at offset ${foDelay}`);
+  }
+  const blip = readOfficeArtRecord(buffer, nameEnd, record.end);
+  if (blip.end !== record.end) throw new Error("Out-of-spec OfficeArtBSE has trailing bytes after blip");
+  const image = parseOfficeArtBlip(buffer, blip);
+  if (cb !== blip.len + 8) {
+    throw new Error(`Out-of-spec OfficeArtBSE.cb ${cb} does not match blip size ${blip.len + 8}`);
+  }
+  return { btWin32, btMacOS, cRef, usage, ...image };
+}
+
+function parseOfficeArtBlip(buffer, record) {
+  // [MS-ODRAW] 2.2.21-2.2.30 define the record-instance values and
+  // UID/tag prefixes for each bitmap blip. Keep this explicit: searching for
+  // an image signature would make malformed records look valid.
+  // https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-odraw/
+  const raster = new Map([
+    [OFFICE_ART_BLIP_JPEG, new Map([[0x046a, { prefix: 17, extension: "jpg", contentType: "image/jpeg" }], [0x06e2, { prefix: 33, extension: "jpg", contentType: "image/jpeg" }]])],
+    [OFFICE_ART_BLIP_PNG, new Map([[0x06e0, { prefix: 17, extension: "png", contentType: "image/png" }], [0x06e1, { prefix: 33, extension: "png", contentType: "image/png" }]])],
+    [OFFICE_ART_BLIP_DIB, new Map([[0x07a8, { prefix: 17, extension: "bmp", contentType: "image/bmp", dib: true }]])],
+    [OFFICE_ART_BLIP_TIFF, new Map([[0x06e4, { prefix: 17, extension: "tif", contentType: "image/tiff" }], [0x06e5, { prefix: 33, extension: "tif", contentType: "image/tiff" }]])],
+  ]);
+  const byInstance = raster.get(record.type);
+  if (byInstance) {
+    const format = byInstance.get(record.inst);
+    if (!format) throw new Error(`Out-of-spec OfficeArt bitmap blip instance 0x${record.inst.toString(16)}`);
+    if (record.len <= format.prefix) throw new Error("Invalid OfficeArt bitmap blip payload");
+    let bytes = Buffer.from(buffer.subarray(record.content + format.prefix, record.end));
+    if (format.dib) bytes = dibToBmp(bytes);
+    validateImageSignature(bytes, format.extension);
+    return { extension: format.extension, contentType: format.contentType, bytes };
+  }
+  if (record.type === OFFICE_ART_BLIP_EMF || record.type === OFFICE_ART_BLIP_WMF || record.type === OFFICE_ART_BLIP_PICT) {
+    if (record.len <= 50) throw new Error("Invalid OfficeArt metafile blip payload");
+    const header = record.content + 16;
+    const uncompressedSize = buffer.readUInt32LE(header);
+    const compressedSize = buffer.readUInt32LE(header + 28);
+    const compression = buffer[header + 32];
+    const filter = buffer[header + 33];
+    if (filter !== 0xfe) throw new Error(`Unimplemented OfficeArt metafile filter 0x${filter.toString(16)}`);
+    const stored = buffer.subarray(header + 34, record.end);
+    if (stored.length !== compressedSize) throw new Error("Out-of-spec OfficeArt metafile compressed size");
+    const bytes = compression === 0x00 ? inflateRawSync(stored)
+      : compression === 0xfe ? Buffer.from(stored)
+        : (() => { throw new Error(`Out-of-spec OfficeArt metafile compression 0x${compression.toString(16)}`); })();
+    if (bytes.length !== uncompressedSize) throw new Error("Out-of-spec OfficeArt metafile uncompressed size");
+    if (record.type === OFFICE_ART_BLIP_PICT) throw new Error("Excluded Macintosh PICT image: no interoperable DOCX image part mapping");
+    return record.type === OFFICE_ART_BLIP_EMF
+      ? { extension: "emf", contentType: "image/x-emf", bytes }
+      : { extension: "wmf", contentType: "image/x-wmf", bytes };
+  }
+  throw new Error(`Unimplemented OfficeArt blip record type 0x${record.type.toString(16)}`);
+}
+
+function validateImageSignature(bytes, extension) {
+  const valid = extension === "png" ? bytes.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]))
+    : extension === "jpg" ? bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+      : extension === "tif" ? bytes.length >= 4 && ((bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2a && bytes[3] === 0) || (bytes[0] === 0x4d && bytes[1] === 0x4d && bytes[2] === 0 && bytes[3] === 0x2a))
+        : extension === "bmp" ? bytes.length >= 2 && bytes[0] === 0x42 && bytes[1] === 0x4d
+          : true;
+  if (!valid) throw new Error(`Invalid OfficeArt ${extension} image signature`);
+}
+
+function dibToBmp(dib) {
+  if (dib.length < 40) throw new Error("Unsupported truncated DIB image");
+  const headerSize = dib.readUInt32LE(0);
+  if (headerSize < 40 || headerSize > dib.length) throw new Error(`Unsupported DIB header size ${headerSize}`);
+  const bitCount = dib.readUInt16LE(14);
+  const compression = dib.readUInt32LE(16);
+  const colorsUsed = dib.readUInt32LE(32);
+  const paletteEntries = colorsUsed || (bitCount <= 8 ? 2 ** bitCount : 0);
+  const bitMasks = compression === 3 && headerSize === 40 ? 12 : 0;
+  const pixelOffset = 14 + headerSize + bitMasks + paletteEntries * 4;
+  if (pixelOffset - 14 > dib.length) throw new Error("Out-of-spec DIB palette exceeds payload");
+  const bmp = Buffer.alloc(14 + dib.length);
+  bmp.write("BM", 0, "ascii");
+  bmp.writeUInt32LE(bmp.length, 2);
+  bmp.writeUInt32LE(pixelOffset, 10);
+  dib.copy(bmp, 14);
+  return bmp;
+}
+
 function parseOfficeArtContent(tableStream, fib) {
-  if (!fib.lcbDggInfo) return new Map();
+  if (!fib.lcbDggInfo) return { body: new Map(), headers: new Map() };
   assertTableRange(tableStream, fib.fcDggInfo, fib.lcbDggInfo, "OfficeArtContent");
   const content = tableStream.subarray(fib.fcDggInfo, fib.fcDggInfo + fib.lcbDggInfo);
   if (content.length < 8) {
@@ -1016,7 +1778,7 @@ function parseOfficeArtContent(tableStream, fib) {
     throw new Error(`Out-of-spec OfficeArtContent: expected DggContainer, got type 0x${dgg.type.toString(16)}`);
   }
 
-  const shapes = new Map();
+  const drawings = { body: new Map(), headers: new Map() };
   let off = dgg.end;
   while (off < content.length) {
     const dgglbl = content[off];
@@ -1025,14 +1787,16 @@ function parseOfficeArtContent(tableStream, fib) {
     if (drawing.type !== OFFICE_ART_DG_CONTAINER || drawing.ver !== 0x0f) {
       throw new Error(`Out-of-spec OfficeArtWordDrawing: expected DgContainer, got type 0x${drawing.type.toString(16)}`);
     }
-    if (dgglbl === 0) {
-      for (const shape of parseOfficeArtShapeContainers(content, drawing.content, drawing.end)) {
-        if (shape.spid != null) shapes.set(shape.spid, shape);
-      }
+    if (dgglbl !== 0 && dgglbl !== 1) {
+      throw new Error(`Out-of-spec OfficeArtWordDrawing dgglbl ${dgglbl}`);
+    }
+    const target = dgglbl === 0 ? drawings.body : drawings.headers;
+    for (const shape of parseOfficeArtShapeContainers(content, drawing.content, drawing.end)) {
+      if (shape.spid != null) target.set(shape.spid, shape);
     }
     off = drawing.end;
   }
-  return shapes;
+  return drawings;
 }
 
 function parseOfficeArtShapeContainers(buffer, start, end) {
@@ -1090,25 +1854,33 @@ function parseOfficeArtShapeContainer(buffer, record) {
 
   const shape = {
     spid: buffer.readUInt32LE(fsp.content),
+    shapeType: fsp.inst,
     fspFlags: buffer.readUInt32LE(fsp.content + 4),
   };
   if (fopt) {
     const properties = parseOfficeArtFopt(buffer, fopt, "OfficeArtFOPT");
+    shape.properties = properties;
     const nameProperty = properties.find((prop) => prop.pid === OFFICE_ART_SHAPE_NAME_PID && prop.complexData);
     if (nameProperty) {
       shape.name = stripNullTerminator(nameProperty.complexData.toString("utf16le"));
       const idMatch = shape.name.match(/(\d+)$/);
       if (idMatch) shape.docPrId = Number.parseInt(idMatch[1], 10);
     }
+    const descriptionProperty = properties.find((prop) => prop.pid === OFFICE_ART_SHAPE_DESCRIPTION_PID && prop.complexData);
+    if (descriptionProperty) {
+      shape.description = stripNullTerminator(descriptionProperty.complexData.toString("utf16le"));
+    }
   }
   if (tertiaryFopt) {
     const properties = parseOfficeArtFopt(buffer, tertiaryFopt, "OfficeArtTertiaryFOPT");
+    shape.tertiaryProperties = properties;
     const gfxProperty = properties.find((prop) => prop.pid === OFFICE_ART_GFXDATA_PID && prop.complexData);
     if (gfxProperty) {
       shape.gfxData = extractOfficeArtGfxData(gfxProperty.complexData);
       const e2oDoc = parseZipEntries(shape.gfxData).get("drs/e2oDoc.xml");
       if (e2oDoc) {
-        const cNvPr = parseEmbeddedShapeCNvPr(e2oDoc.toString("utf8"));
+        shape.e2oXml = e2oDoc.toString("utf8");
+        const cNvPr = parseEmbeddedShapeCNvPr(shape.e2oXml);
         if (cNvPr) {
           shape.docPrId = cNvPr.id;
           shape.name = cNvPr.name;
@@ -1145,8 +1917,11 @@ function parseOfficeArtClientData(buffer, start, end) {
 }
 
 function attachOfficeArtToShapeAnchors(shapeAnchors, officeArtShapes) {
-  const matchedSpids = shapeAnchors.map((shape) => officeArtShapes.get(shape.lid)?.spid).filter(Number.isInteger);
+  const matched = shapeAnchors.map((shape) => officeArtShapes.get(shape.lid)).filter(Boolean);
+  const matchedSpids = matched.map((shape) => shape.spid).filter(Number.isInteger);
+  const matchedOrders = matched.map((shape) => shape.drawingOrder).filter(Number.isInteger);
   const fallbackSpid = matchedSpids.length ? Math.min(...matchedSpids) : null;
+  const firstDrawingOrder = matchedOrders.length ? Math.min(...matchedOrders) : 0;
   return shapeAnchors.map((shape) => {
     const officeArt = officeArtShapes.get(shape.lid);
     if (!officeArt) return shape;
@@ -1154,13 +1929,18 @@ function attachOfficeArtToShapeAnchors(shapeAnchors, officeArtShapes) {
       ...shape,
       officeArt: {
         spid: officeArt.spid,
+        shapeType: officeArt.shapeType,
         fspFlags: officeArt.fspFlags,
         drawingOrder: officeArt.drawingOrder,
-        relativeHeight: WPS_DRAWING_RELATIVE_HEIGHT_BASE + (officeArt.drawingOrder + 1) * WPS_DRAWING_RELATIVE_HEIGHT_STEP,
+        relativeHeight: WPS_DRAWING_RELATIVE_HEIGHT_BASE + (officeArt.drawingOrder - firstDrawingOrder + 1) * WPS_DRAWING_RELATIVE_HEIGHT_STEP,
         docPrId: officeArt.docPrId,
         name: officeArt.name,
+        description: officeArt.description,
         fallbackSpid,
         gfxData: officeArt.gfxData,
+        e2oXml: officeArt.e2oXml,
+        properties: officeArt.properties,
+        tertiaryProperties: officeArt.tertiaryProperties,
       },
     };
   });
@@ -1293,26 +2073,26 @@ export function parseSttbfRMark(sttbf) {
   return authors;
 }
 
-function parseMainShapeAnchors(tableStream, fib) {
-  if (!fib.lcbPlcSpaMom) return [];
-  assertTableRange(tableStream, fib.fcPlcSpaMom, fib.lcbPlcSpaMom, "PlcfSpaMom");
-  const plcf = tableStream.subarray(fib.fcPlcSpaMom, fib.fcPlcSpaMom + fib.lcbPlcSpaMom);
+function parseShapeAnchors(tableStream, fc, lcb, characterCount, label) {
+  if (!lcb) return [];
+  assertTableRange(tableStream, fc, lcb, label);
+  const plcf = tableStream.subarray(fc, fc + lcb);
   // MS-DOC-SPEC/15 fcPlcSpaMom/lcbPlcSpaMom point to PlcfSpa. A PlcfSpa is
   // a PLC: (n + 1) CPs followed by n fixed-size Spa records. MS-DOC-SPEC/19
   // Spa is 26 bytes.
   const spaSize = 26;
   if (plcf.length < 4 || (plcf.length - 4) % (4 + spaSize) !== 0) {
-    throw new Error(`Invalid Word binary document: PlcfSpaMom length ${plcf.length} is not valid`);
+    throw new Error(`Invalid Word binary document: ${label} length ${plcf.length} is not valid`);
   }
   const count = (plcf.length - 4) / (4 + spaSize);
   const cps = [];
   for (let i = 0; i <= count; i += 1) {
     const cp = plcf.readUInt32LE(i * 4);
-    if (i < count && cp > fib.characterCounts.body) {
-      throw new Error(`Out-of-spec PlcfSpaMom CP ${cp} exceeds body character count ${fib.characterCounts.body}`);
+    if (i < count && cp > characterCount) {
+      throw new Error(`Out-of-spec ${label} CP ${cp} exceeds story character count ${characterCount}`);
     }
     if (i > 0 && cp < cps[i - 1]) {
-      throw new Error("Out-of-spec PlcfSpaMom CPs are not sorted");
+      throw new Error(`Out-of-spec ${label} CPs are not sorted`);
     }
     cps.push(cp);
   }
@@ -1395,46 +2175,32 @@ function parseUnicodeSttbNoExtra(sttbf, label) {
   return strings;
 }
 
-function extractParagraphProperties(wordDocument, tableStream, fib, bodyText, styles, pieces) {
-  if (!fib.fcPapx || !fib.lcbPapx || fib.lcbPapx < 4) {
-    return [];
-  }
-  if (fib.fcPapx + fib.lcbPapx > tableStream.length) {
-    return [];
-  }
-
+function extractParagraphPropertyEntries(wordDocument, tableStream, fib, documentCharacterCount, styles, pieces) {
+  if (!fib.fcPapx || !fib.lcbPapx || fib.lcbPapx < 4) return [];
+  if (fib.fcPapx + fib.lcbPapx > tableStream.length) return [];
   const plcf = tableStream.subarray(fib.fcPapx, fib.fcPapx + fib.lcbPapx);
   const binCount = (fib.lcbPapx - 4) / 8;
-  if (binCount <= 0 || !Number.isInteger(binCount)) {
-    return [];
-  }
-
-  const binFCs = [];
-  for (let i = 0; i <= binCount; i += 1) {
-    binFCs.push(plcf.readUInt32LE(i * 4));
-  }
-
+  if (binCount <= 0 || !Number.isInteger(binCount)) return [];
   const pageNumbers = [];
   for (let bi = 0; bi < binCount; bi += 1) {
     pageNumbers.push(plcf.readUInt32LE((binCount + 1) * 4 + bi * 4));
   }
-
-  const bodyParagraphRanges = getParagraphRanges(bodyText);
   const allEntries = [];
-
-  for (let bi = 0; bi < binCount; bi += 1) {
-    const pageNumber = pageNumbers[bi];
+  for (const pageNumber of pageNumbers) {
     if (pageNumber === 0) continue;
     const pageOffset = pageNumber * 512;
     if (pageOffset + PHE_SIZE > wordDocument.length) continue;
-
     const page = wordDocument.subarray(pageOffset, Math.min(pageOffset + 512, wordDocument.length));
-    const entries = parsePapxEntries(page, styles, pieces, fib.characterCounts.body);
-    allEntries.push(...entries);
+    allEntries.push(...parsePapxEntries(page, styles, pieces, documentCharacterCount));
   }
+  return allEntries;
+}
 
-  return bodyParagraphRanges.map((paragraphRange) => {
-    const direct = allEntries.find((entry) => rangesOverlap(entry, paragraphRange)) ?? null;
+function paragraphPropertiesForStory(story, allEntries) {
+  const paragraphRanges = getParagraphRanges(story.rawText);
+  return paragraphRanges.map((paragraphRange) => {
+    const globalRange = { cpStart: story.cpStart + paragraphRange.cpStart, cpEnd: story.cpStart + paragraphRange.cpEnd };
+    const direct = allEntries.find((entry) => rangesOverlap(entry, globalRange)) ?? null;
     return direct?.properties ?? null;
   });
 }
@@ -2560,6 +3326,20 @@ function applySectionSprm(props, sprm, val) {
     case 0xd237:
       applyPageBorderSprm(props, "right", val);
       break;
+    case 0x522f: {
+      const raw = val.readUInt16LE(0);
+      if ((raw & 0xff00) !== 0) throw new Error("Out-of-spec SPgbPropOperand reserved byte must be zero");
+      const applyTo = raw & 0x0007;
+      const pageDepth = (raw >> 3) & 0x0003;
+      const offsetFrom = (raw >> 5) & 0x0007;
+      if (applyTo > 2 || pageDepth > 1 || offsetFrom > 1) throw new Error(`Out-of-spec SPgbPropOperand 0x${raw.toString(16)}`);
+      props.pageBorderProperties = {
+        display: ["allPages", "firstPage", "notFirstPage"][applyTo],
+        zOrder: ["front", "back"][pageDepth],
+        offsetFrom: ["text", "page"][offsetFrom],
+      };
+      break;
+    }
     case 0xb01f:
       props.pageWidth = val.readUInt16LE(0);
       break;
@@ -2672,15 +3452,27 @@ function applyPageBorderSprm(props, side, val) {
   if (brc.length !== 4 && brc.length !== 8) {
     throw new Error(`Out-of-spec page border operand size ${val.length}`);
   }
-  const isNone = brc.every((byte) => byte === 0) || (brc[0] === 0 && brc[1] === 0);
-  if (!isNone) {
-    throw new Error(`Unimplemented non-empty section page border parsing on ${side}`);
+  let border;
+  if (brc.length === 4) {
+    border = parseBrc80Raw(brc[0], brc[1], brc[2], brc[3] & 0x1f);
+  } else {
+    const brcType = brc[5];
+    const valName = BRC_TYPE_NAMES[brcType];
+    if (!valName) throw new Error(`Out-of-spec page border BrcType ${brcType}`);
+    border = {
+      val: valName,
+      color: colorRefToHex(brc.subarray(0, 4)),
+      sz: String(brc[4]),
+      space: String(brc[6] & 0x1f),
+      shadow: (brc[7] & 0x20) !== 0,
+      frame: (brc[7] & 0x40) !== 0,
+    };
   }
   props.pageBorders ??= {};
-  props.pageBorders[side] = { style: "none" };
+  props.pageBorders[side] = border.val === "none" ? { style: "none" } : { ...border, style: border.val };
 }
 
-function extractCharacterRuns(wordDocument, tableStream, fib, bodyText, pieces, styles) {
+function extractCharacterRuns(wordDocument, tableStream, fib, documentText, pieces, styles) {
   if (!fib.lcbChpx || fib.lcbChpx < 4) return [];
   if (fib.fcChpx + fib.lcbChpx > tableStream.length) return [];
 
@@ -2697,7 +3489,7 @@ function extractCharacterRuns(wordDocument, tableStream, fib, bodyText, pieces, 
     pageNumbers.push(plcf.readUInt32LE((binCount + 1) * 4 + bi * 4));
   }
 
-  const bodyCharacterCount = bodyText.length;
+  const documentCharacterCount = documentText.length;
   const runs = [];
 
   for (let bi = 0; bi < binCount; bi += 1) {
@@ -2716,7 +3508,7 @@ function extractCharacterRuns(wordDocument, tableStream, fib, bodyText, pieces, 
     for (let i = 0; i < crun; i += 1) {
       const cpStart = fileOffsetToCharacterPosition(fcBoundaries[i], pieces);
       const cpEnd = fileOffsetToCharacterPosition(fcBoundaries[i + 1], pieces);
-      if (cpStart == null || cpEnd == null || cpStart >= bodyCharacterCount || cpEnd <= 0) continue;
+      if (cpStart == null || cpEnd == null || cpStart >= documentCharacterCount || cpEnd <= 0) continue;
 
       const off = page[offsetArrayStart + i] * 2;
       if (off === 0 || off >= page.length) continue;
@@ -2733,7 +3525,7 @@ function extractCharacterRuns(wordDocument, tableStream, fib, bodyText, pieces, 
       }
       runs.push({
         cpStart: Math.max(0, cpStart),
-        cpEnd: Math.min(bodyCharacterCount, cpEnd),
+        cpEnd: Math.min(documentCharacterCount, cpEnd),
         properties: props,
       });
     }
@@ -3152,6 +3944,12 @@ function applyCellFlags(row) {
     if (!cell || !flags) continue;
     if (flags.bVertRestart) cell.vMerge = "restart";
     else if (flags.bVertMerge) cell.vMerge = "continue";
+    if (flags.horzMerge === 2 || flags.horzMerge === 3) cell.hMerge = "restart";
+    else if (flags.horzMerge === 1) cell.hMerge = "continue";
+    const textDirectionByFlow = { 0: null, 1: "tbRl", 3: "btLr", 4: "lrTbV", 5: "tbRlV" };
+    cell.textDirection = textDirectionByFlow[flags.textFlow];
+    cell.fitText = flags.fFitText === true;
+    cell.hideMark = flags.fHideMark === true;
     cell.noWrap = flags.fNoWrap === true;
     if (flags.nVertAlign === 2) cell.vAlign = "bottom";
     else if (flags.nVertAlign === 1) cell.vAlign = "center";
@@ -3517,17 +4315,28 @@ function parseTableRowSprms(data, dataStream = null) {
             for (let i = 0; i < descriptorCount; i += 1) {
               const base = descriptorStart + i * 20;
               const bits = tblData.readUInt16LE(base);
+              const horzMerge = bits & 0x0003;
+              const textFlow = (bits >> 2) & 0x0007;
+              const vertMerge = (bits >> 5) & 0x0003;
+              if (![0, 1, 3, 4, 5].includes(textFlow)) {
+                throw new Error(`Out-of-spec TCGRF TextFlow ${textFlow}`);
+              }
               cellFlags.push({
-                bFirstMerged: (bits & 0x0001) !== 0,
-                bMerged: (bits & 0x0002) !== 0,
-                bVertical: (bits & 0x0004) !== 0,
-                bBackward: (bits & 0x0008) !== 0,
-                bRotateFont: (bits & 0x0010) !== 0,
-                bVertMerge: (bits & 0x0020) !== 0,
-                bVertRestart: (bits & 0x0040) !== 0,
+                horzMerge,
+                textFlow,
+                vertMerge,
+                bFirstMerged: horzMerge === 2 || horzMerge === 3,
+                bMerged: horzMerge === 1,
+                bVertical: textFlow !== 0,
+                bBackward: textFlow === 3,
+                bRotateFont: textFlow === 4 || textFlow === 5,
+                bVertMerge: vertMerge === 1,
+                bVertRestart: vertMerge === 3,
                 nVertAlign: (bits & 0x0180) >> 7,
+                fFitText: (bits & 0x1000) !== 0,
                 // MS-DOC-SPEC/19 TCGRF.fNoWrap is bit 13 of the TC80 flag word.
                 fNoWrap: (bits & 0x2000) !== 0,
+                fHideMark: (bits & 0x4000) !== 0,
               });
               cellBorders.push(parseCellBordersFromDescriptor(tblData.subarray(base + 4, base + 20)));
             }

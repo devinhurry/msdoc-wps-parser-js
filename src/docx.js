@@ -17,10 +17,10 @@ function nextParaId() {
   return id;
 }
 
-function buildContentTypesXml({ footerCount = 13, headerCount = 0, includeNumbering = true, includeNotes = true } = {}) {
+function buildContentTypesXml({ footerCount = 13, headerCount = 0, includeNumbering = true, includeNotes = true, includeComments = false, mediaContentTypes = [] } = {}) {
   const includeFooters = footerCount > 0;
   const includeHeaders = headerCount > 0;
-  if (!includeFooters && !includeHeaders && !includeNumbering) {
+  if (!includeFooters && !includeHeaders && !includeNumbering && !includeComments && mediaContentTypes.length === 0) {
     return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -42,6 +42,7 @@ function buildContentTypesXml({ footerCount = 13, headerCount = 0, includeNumber
     `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">`,
     `  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>`,
     `  <Default Extension="xml" ContentType="application/xml"/>`,
+    ...mediaContentTypes.map(({ extension, contentType }) => `  <Default Extension="${escapeXml(extension)}" ContentType="${escapeXml(contentType)}"/>`),
     `  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>`,
     `  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>`,
     `  <Override PartName="/docProps/custom.xml" ContentType="application/vnd.openxmlformats-officedocument.custom-properties+xml"/>`,
@@ -55,6 +56,9 @@ function buildContentTypesXml({ footerCount = 13, headerCount = 0, includeNumber
       `  <Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>`,
       `  <Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>`,
     );
+  }
+  if (includeComments) {
+    parts.push(`  <Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>`);
   }
   if (includeFooters) {
     for (let i = 1; i <= footerCount; i++) {
@@ -81,10 +85,10 @@ const ROOT_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
 </Relationships>`;
 
-function buildDocumentRelsXml({ footerCount = 13, headerCount = 0, includeNumbering = true, footerRelationshipStartId = 5, includeNotes = true, headerFooterRelationships = null } = {}) {
+function buildDocumentRelsXml({ footerCount = 13, headerCount = 0, includeNumbering = true, footerRelationshipStartId = 5, includeNotes = true, headerFooterRelationships = null, includeComments = false, mediaRelationships = [] } = {}) {
   const includeFooters = footerCount > 0;
   const includeHeaders = headerCount > 0;
-  if (!includeFooters && !includeHeaders && !includeNumbering) {
+  if (!includeFooters && !includeHeaders && !includeNumbering && !includeComments && mediaRelationships.length === 0) {
     return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>
@@ -124,19 +128,18 @@ function buildDocumentRelsXml({ footerCount = 13, headerCount = 0, includeNumber
   if (includeNumbering) {
     parts.push(`  <Relationship Id="rId${themeRid + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>`);
   }
-  parts.push(`  <Relationship Id="rId${themeRid + (includeNumbering ? 2 : 1)}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>`);
+  const fontTableRid = themeRid + (includeNumbering ? 2 : 1);
+  parts.push(`  <Relationship Id="rId${fontTableRid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>`);
+  let nextRelationshipId = fontTableRid + 1;
+  if (includeComments) {
+    parts.push(`  <Relationship Id="rId${nextRelationshipId++}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>`);
+  }
+  for (const relationship of mediaRelationships) {
+    parts.push(`  <Relationship Id="${relationship.id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${escapeXml(relationship.target)}"/>`);
+  }
   parts.push(`</Relationships>`);
   return parts.join("\n");
 }
-
-const APP_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
-  <Application>msdoc-wps-parser</Application>
-</Properties>`;
-
-const CUSTOM_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"/>`;
-
 
 function buildSettingsXml(wpsDocument = {}) {
   const sections = wpsDocument.sections ?? [];
@@ -415,6 +418,60 @@ const FOOTNOTES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 const ENDNOTES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote><w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote></w:endnotes>`;
 
+function createNotesXml(type, collection, fieldPlc) {
+  if (type !== "footnote" && type !== "endnote") throw new Error(`Invalid note type ${type}`);
+  const root = `${type}s`;
+  const noteStories = collection?.stories ?? [];
+  const parts = [
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`,
+    `<w:${root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">`,
+    `<w:${type} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:${type}>`,
+    `<w:${type} w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:${type}>`,
+  ];
+  for (const story of noteStories) {
+    const storyFields = sliceFieldPlcForStory(fieldPlc, story);
+    const fieldPlan = createFieldEmissionPlan(storyFields, story.text, `${type} ${story.id}`);
+    const paragraphs = story.text.split("\r");
+    let cp = 0;
+    const body = paragraphs.map((paragraph) => {
+      const xml = `<w:p>${buildPlainStoryRuns(paragraph, cp, fieldPlan, { noteType: type })}</w:p>`;
+      cp += paragraph.length + 1;
+      return xml;
+    }).join("");
+    parts.push(`<w:${type} w:id="${story.id}">${body}</w:${type}>`);
+  }
+  parts.push(`</w:${root}>`);
+  return parts.join("");
+}
+
+function createCommentsXml(commentCollection, fieldPlc) {
+  const parts = [
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`,
+    `<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">`,
+  ];
+  for (const comment of commentCollection?.comments ?? []) {
+    const sourceStory = comment.story;
+    const adjustedStory = {
+      ...sourceStory,
+      cpStart: sourceStory.cpStart + 1,
+      cpEnd: sourceStory.cpEnd,
+      text: sourceStory.text,
+    };
+    const storyFields = sliceFieldPlcForStory(fieldPlc, adjustedStory);
+    const fieldPlan = createFieldEmissionPlan(storyFields, adjustedStory.text, `comment ${comment.id}`);
+    const paragraphs = adjustedStory.text.split("\r");
+    let cp = 0;
+    const body = paragraphs.map((paragraph) => {
+      const xml = `<w:p>${buildPlainStoryRuns(paragraph, cp, fieldPlan)}</w:p>`;
+      cp += paragraph.length + 1;
+      return xml;
+    }).join("");
+    parts.push(`<w:comment w:id="${comment.id}" w:author="${escapeXml(comment.author)}" w:initials="${escapeXml(comment.initials)}">${body}</w:comment>`);
+  }
+  parts.push(`</w:comments>`);
+  return parts.join("");
+}
+
 const THEME_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office"><a:themeElements><a:clrScheme name="Office"><a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1><a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F497D"/></a:dk2><a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1><a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="9BBB59"/></a:accent3><a:accent4><a:srgbClr val="8064A2"/></a:accent4><a:accent5><a:srgbClr val="4BACC6"/></a:accent5><a:accent6><a:srgbClr val="F79646"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink><a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme><a:fontScheme name="Office"><a:majorFont><a:latin typeface="Cambria"/><a:ea typeface=""/><a:cs typeface=""/><a:font script="Jpan" typeface="游ゴシック Light"/><a:font script="Hang" typeface="맑은 고딕"/><a:font script="Hans" typeface="宋体"/><a:font script="Hant" typeface="新細明體"/><a:font script="Arab" typeface="Times New Roman"/><a:font script="Hebr" typeface="Times New Roman"/><a:font script="Thai" typeface="Angsana New"/><a:font script="Ethi" typeface="Nyala"/><a:font script="Beng" typeface="Vrinda"/><a:font script="Gujr" typeface="Shruti"/><a:font script="Khmr" typeface="MoolBoran"/><a:font script="Knda" typeface="Tunga"/><a:font script="Guru" typeface="Raavi"/><a:font script="Cans" typeface="Euphemia"/><a:font script="Cher" typeface="Plantagenet Cherokee"/><a:font script="Yiii" typeface="Microsoft Yi Baiti"/><a:font script="Tibt" typeface="Microsoft Himalaya"/><a:font script="Thaa" typeface="MV Boli"/><a:font script="Deva" typeface="Mangal"/><a:font script="Telu" typeface="Gautami"/><a:font script="Taml" typeface="Latha"/><a:font script="Syrc" typeface="Estrangelo Edessa"/><a:font script="Orya" typeface="Kalinga"/><a:font script="Mlym" typeface="Kartika"/><a:font script="Laoo" typeface="DokChampa"/><a:font script="Sinh" typeface="Iskoola Pota"/><a:font script="Mong" typeface="Mongolian Baiti"/><a:font script="Viet" typeface="Times New Roman"/><a:font script="Uigh" typeface="Microsoft Uighur"/><a:font script="Geor" typeface="Sylfaen"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/><a:font script="Jpan" typeface="游明朝"/><a:font script="Hang" typeface="맑은 고딕"/><a:font script="Hans" typeface="宋体"/><a:font script="Hant" typeface="新細明體"/><a:font script="Arab" typeface="Arial"/><a:font script="Hebr" typeface="Arial"/><a:font script="Thai" typeface="Cordia New"/><a:font script="Ethi" typeface="Nyala"/><a:font script="Beng" typeface="Vrinda"/><a:font script="Gujr" typeface="Shruti"/><a:font script="Khmr" typeface="DaunPenh"/><a:font script="Knda" typeface="Tunga"/><a:font script="Guru" typeface="Raavi"/><a:font script="Cans" typeface="Euphemia"/><a:font script="Cher" typeface="Plantagenet Cherokee"/><a:font script="Yiii" typeface="Microsoft Yi Baiti"/><a:font script="Tibt" typeface="Microsoft Himalaya"/><a:font script="Thaa" typeface="MV Boli"/><a:font script="Deva" typeface="Mangal"/><a:font script="Telu" typeface="Gautami"/><a:font script="Taml" typeface="Latha"/><a:font script="Syrc" typeface="Estrangelo Edessa"/><a:font script="Orya" typeface="Kalinga"/><a:font script="Mlym" typeface="Kartika"/><a:font script="Laoo" typeface="DokChampa"/><a:font script="Sinh" typeface="Iskoola Pota"/><a:font script="Mong" typeface="Mongolian Baiti"/><a:font script="Viet" typeface="Arial"/><a:font script="Uigh" typeface="Microsoft Uighur"/><a:font script="Geor" typeface="Sylfaen"/></a:minorFont></a:fontScheme><a:fmtScheme name="Office"><a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/></a:fmtScheme></a:themeElements></a:theme>`;
 
@@ -685,12 +742,231 @@ function levelTextToXml(lvl) {
   return text;
 }
 
+function createPlcfHddHeaderFooterPlan(wpsDocument = {}, sections = []) {
+  const parsedSections = wpsDocument.plcfHdd?.sections;
+  if (!Array.isArray(parsedSections) || parsedSections.length !== sections.length) {
+    throw new Error("Invalid WPS document: parsed PlcfHdd section group count does not match PlcfSed sections");
+  }
+
+  const bySection = new Map();
+  const relationships = [];
+  const parts = [];
+  let nextRid = 5;
+  let headerCount = 0;
+  let footerCount = 0;
+
+  const addStory = (sectionIndex, story, relationshipType, referenceKey) => {
+    if (!story || story.empty) return;
+    const index = relationshipType === "header" ? ++headerCount : ++footerCount;
+    const id = `rId${nextRid++}`;
+    relationships.push({ id, type: relationshipType, index });
+    parts.push({
+      type: relationshipType,
+      index,
+      story,
+    });
+    const refs = bySection.get(sectionIndex) ?? {};
+    refs[referenceKey] = id;
+    bySection.set(sectionIndex, refs);
+  };
+
+  for (let sectionIndex = 0; sectionIndex < parsedSections.length; sectionIndex += 1) {
+    const stories = parsedSections[sectionIndex];
+    addStory(sectionIndex, stories.firstHeader, "header", "firstHeaderId");
+    addStory(sectionIndex, stories.defaultHeader, "header", "defaultHeaderId");
+    addStory(sectionIndex, stories.evenHeader, "header", "evenHeaderId");
+    addStory(sectionIndex, stories.firstFooter, "footer", "firstFooterId");
+    addStory(sectionIndex, stories.defaultFooter, "footer", "defaultFooterId");
+    addStory(sectionIndex, stories.evenFooter, "footer", "evenFooterId");
+  }
+
+  return {
+    footerCount,
+    headerCount,
+    footerRelationshipStartId: 5,
+    headerFooterRelationships: relationships,
+    headerFooterParts: parts,
+    includeNotes: true,
+    bySection,
+  };
+}
+
+function createHeaderFooterStoryXml(type, story, headerFields = null, options = {}) {
+  if (type !== "header" && type !== "footer") {
+    throw new Error(`Invalid header/footer story type ${type}`);
+  }
+  const root = type === "header" ? "hdr" : "ftr";
+  const storyFields = sliceFieldPlcForStory(headerFields, story);
+  const fieldPlan = createFieldEmissionPlan(storyFields, story.text, `${story.kind} header/footer story`);
+  const paragraphs = String(story.text).split("\r");
+  let cp = 0;
+  const body = paragraphs.map((paragraph, paragraphIndex) => {
+    const paragraphProperties = options.paragraphProperties?.[paragraphIndex] ?? null;
+    const pPr = buildParagraphPropertiesXml(paragraphProperties, null, options.fontTable ?? [], null, null, -1, paragraph, options);
+    const xml = `<w:p>${pPr}${buildPlainStoryRuns(paragraph, cp, fieldPlan, options)}</w:p>`;
+    cp += paragraph.length + 1;
+    return xml;
+  }).join("");
+  const namespaces = 'xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w10="urn:schemas-microsoft-com:office:word" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wpi="http://schemas.microsoft.com/office/word/2010/wordprocessingInk" xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" mc:Ignorable="w14 w15 wp14"';
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:${root} ${namespaces}>${body}</w:${root}>`;
+}
+
+function sliceFieldPlcForStory(fieldPlc, story) {
+  const records = fieldPlc?.records ?? [];
+  const storyRecords = records
+    .filter((record) => record.cp >= story.cpStart && record.cp < story.cpEnd)
+    .map((record) => ({ ...record, cp: record.cp - story.cpStart }));
+  return { records: storyRecords };
+}
+
+function buildPlainStoryRuns(text, cpStart, fieldPlan, options = {}) {
+  const parts = [];
+  const characterProperties = options.characterProperties ?? [];
+  const fontTable = options.fontTable ?? [];
+  let chunk = "";
+  let chunkTag = null;
+  let chunkCp = 0;
+  let chunkPropsKey = null;
+
+  const flush = () => {
+    if (!chunk) return;
+    parts.push(...buildTextRuns(chunk, characterProperties, fontTable, chunkCp, null, null, options.runDefaults ?? null, null, chunkTag, options));
+    chunk = "";
+    chunkTag = null;
+    chunkPropsKey = null;
+  };
+
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    const cp = cpStart + index;
+    const rPr = buildRunPropertiesXml(characterProperties, fontTable, cp, null, options.runDefaults ?? null);
+    if (ch === "\x13" || ch === "\x14" || ch === "\x15") {
+      flush();
+      const record = requireFieldRecord(fieldPlan, cp, ch.charCodeAt(0), "secondary story");
+      parts.push(`<w:r>${buildFieldCharXml(record, rPr)}</w:r>`);
+    } else if (ch === "\x01") {
+      flush();
+      const picture = options.picturesByCp?.get(cp);
+      if (!picture) throw new Error(`Invalid secondary story: picture character at CP ${cp} has no parsed PICF data`);
+      parts.push(`<w:r>${rPr}${buildInlinePictureXml(picture)}</w:r>`);
+    } else if (ch === "\x02" && options.noteType) {
+      flush();
+      parts.push(`<w:r>${rPr}<w:${options.noteType}Ref/></w:r>`);
+    } else if (ch === "\x08") {
+      flush();
+      const shape = findShapeAnchorAtCp(options.shapeAnchors, cp);
+      if (shape) parts.push(`<w:r>${rPr}${buildShapeAnchorXml(shape, options)}</w:r>`);
+    } else if (ch === "\t") {
+      flush();
+      parts.push(`<w:r>${rPr}<w:tab/></w:r>`);
+    } else if (ch === "\x0b") {
+      flush();
+      parts.push(`<w:r>${rPr}<w:br/></w:r>`);
+    } else if (ch >= "\x20" || ch === "\u00a0") {
+      const textTag = fieldTextTagAtCp(fieldPlan, cp);
+      const propsKey = runPropertiesKey(characterProperties[cp], fontTable);
+      if (chunk && (textTag !== chunkTag || propsKey !== chunkPropsKey)) flush();
+      if (!chunk) {
+        chunkCp = cp;
+        chunkTag = textTag;
+        chunkPropsKey = propsKey;
+      }
+      chunk += ch;
+    }
+  }
+  flush();
+  return parts.join("");
+}
+
+function createFieldEmissionPlan(fieldPlc, storyText, label) {
+  const records = fieldPlc?.records ?? [];
+  const recordByCp = new Map();
+  const textRanges = [];
+  const stack = [];
+  let cursor = 0;
+
+  const addTextRange = (cpEnd) => {
+    if (cpEnd > cursor) {
+      textRanges.push({
+        cpStart: cursor,
+        cpEnd,
+        textTag: stack.at(-1)?.phase === "instruction" ? "instrText" : "t",
+      });
+    }
+  };
+
+  for (const record of records) {
+    if (!Number.isInteger(record.cp) || record.cp < cursor || record.cp >= storyText.length) {
+      throw new Error(`Invalid ${label} field record CP ${record.cp}`);
+    }
+    addTextRange(record.cp);
+    if (recordByCp.has(record.cp)) {
+      throw new Error(`Invalid ${label} duplicate field record CP ${record.cp}`);
+    }
+    recordByCp.set(record.cp, record);
+    if (storyText.charCodeAt(record.cp) !== record.ch) {
+      throw new Error(`Invalid ${label} field record does not match text at CP ${record.cp}`);
+    }
+    if (record.ch === 0x13) {
+      stack.push({ phase: "instruction", record });
+    } else if (record.ch === 0x14) {
+      if (!stack.length || stack.at(-1).phase !== "instruction") {
+        throw new Error(`Invalid ${label} field separator at CP ${record.cp}`);
+      }
+      stack.at(-1).phase = "result";
+    } else if (record.ch === 0x15) {
+      if (!stack.length) {
+        throw new Error(`Invalid ${label} field end at CP ${record.cp}`);
+      }
+      stack.pop();
+    } else {
+      throw new Error(`Invalid ${label} field character ${record.ch} at CP ${record.cp}`);
+    }
+    cursor = record.cp + 1;
+  }
+  addTextRange(storyText.length);
+  if (stack.length) {
+    throw new Error(`Invalid ${label}: unterminated field metadata`);
+  }
+  for (let cp = 0; cp < storyText.length; cp += 1) {
+    const ch = storyText.charCodeAt(cp);
+    if ((ch === 0x13 || ch === 0x14 || ch === 0x15) && !recordByCp.has(cp)) {
+      throw new Error(`Invalid ${label}: field character at CP ${cp} is absent from Plcfld`);
+    }
+  }
+  return { recordByCp, textRanges };
+}
+
+function fieldTextTagAtCp(fieldPlan, cp) {
+  if (!fieldPlan) return "t";
+  const range = fieldPlan.textRanges.find((candidate) => cp >= candidate.cpStart && cp < candidate.cpEnd);
+  return range?.textTag ?? "t";
+}
+
+function requireFieldRecord(fieldPlan, cp, expectedCh, label) {
+  const record = fieldPlan?.recordByCp?.get(cp);
+  if (!record || record.ch !== expectedCh) {
+    throw new Error(`Invalid ${label}: missing Plcfld record for field character at CP ${cp}`);
+  }
+  return record;
+}
+
+function buildFieldCharXml(record, rPr = "") {
+  const type = record.ch === 0x13 ? "begin" : record.ch === 0x14 ? "separate" : "end";
+  let flags = "";
+  if (record.ch === 0x13) {
+    if (record.endFlags?.locked) flags += ' w:fldLock="true"';
+    if (record.endFlags?.resultsDirty) flags += ' w:dirty="true"';
+  }
+  return `${rPr}<w:fldChar w:fldCharType="${type}"${flags}/>`;
+}
+
 function createFooterReferencePlan(wpsDocument = {}, sections = []) {
+  if (wpsDocument.plcfHdd?.stories?.length) {
+    return createPlcfHddHeaderFooterPlan(wpsDocument, sections);
+  }
   if (!hasHeaderFooterSubdocument(wpsDocument)) {
     return { footerCount: 0, bySection: new Map() };
-  }
-  if (wpsDocument.plcfHdd?.cpArray?.length) {
-    throw new Error("PlcfHdd-backed footer references are not implemented yet");
   }
 
   if (sections.some((section) => section?.properties?.docGridType != null)) {
@@ -739,12 +1015,27 @@ function createFooterReferencePlan(wpsDocument = {}, sections = []) {
         footerCount: 1,
         footerRelationshipStartId: 3,
         includeNotes: false,
+        headerFooterRelationships: [{ id: "rId3", type: "footer", index: 1 }],
+        headerFooterParts: [{
+          type: "footer",
+          index: 1,
+          story: { kind: "compactDefaultFooter", cpStart: 0, cpEnd: headerText.length, text: headerText, empty: false, compact: true },
+        }],
         bySection: new Map([[0, { defaultFooterId: "rId3" }]]),
       };
     }
     if (sections.length === 1 && (onlySection.docGridType === 1 || onlySection.docGridType === 2) && /[^\r]/.test(headerText)) {
       // MS-DOC-SPEC/13: when different even/odd headers are not enabled, the
       // odd header and odd footer stories are the default header/footer.
+      const textboxLids = new Set((wpsDocument.textboxes?.headers?.textboxes ?? []).map((textbox) => textbox.lid));
+      const linkedTextboxAnchors = (wpsDocument.headerShapeAnchors ?? []).filter((shape) => textboxLids.has(shape.lid));
+      if (linkedTextboxAnchors.length !== 1) {
+        throw new Error(`Unable to split compact WPS header/footer stories: expected one FTXBXS-linked shape, got ${linkedTextboxAnchors.length}`);
+      }
+      const splitCp = linkedTextboxAnchors[0].cpStart;
+      if (splitCp <= 0 || splitCp >= headerText.length) {
+        throw new Error(`Out-of-spec compact WPS header/footer split CP ${splitCp}`);
+      }
       return {
         footerCount: 1,
         headerCount: 1,
@@ -753,6 +1044,10 @@ function createFooterReferencePlan(wpsDocument = {}, sections = []) {
         headerFooterRelationships: [
           { id: "rId3", type: "header", index: 1 },
           { id: "rId4", type: "footer", index: 1 },
+        ],
+        headerFooterParts: [
+          { type: "header", index: 1, story: { kind: "compactDefaultHeader", cpStart: 0, cpEnd: splitCp, text: headerText.slice(0, splitCp), empty: false, compact: true } },
+          { type: "footer", index: 1, story: { kind: "compactDefaultFooter", cpStart: splitCp, cpEnd: headerText.length, text: headerText.slice(splitCp), empty: false, compact: true } },
         ],
         bySection: new Map([[0, { defaultHeaderId: "rId3", defaultFooterId: "rId4" }]]),
       };
@@ -927,12 +1222,103 @@ function getFooterIds(sectionIndex, documentOptions = {}) {
   return documentOptions.footerIdsBySection?.get(sectionIndex) ?? {};
 }
 
+function prepareEmbeddedContent(wpsDocument, footerReferencePlan, includeNumbering, includeComments, fontTable) {
+  const mediaEntries = [];
+  const mediaBySource = new Map();
+  const mediaContentTypeMap = new Map();
+
+  const registerMedia = (picture) => {
+    const key = `${picture.dataOffset}:${picture.byteLength}:${picture.extension}`;
+    let media = mediaBySource.get(key);
+    if (!media) {
+      const index = mediaEntries.length + 1;
+      media = {
+        name: `image${index}.${picture.extension}`,
+        extension: picture.extension,
+        contentType: picture.contentType,
+        bytes: picture.bytes,
+      };
+      mediaEntries.push(media);
+      mediaBySource.set(key, media);
+      mediaContentTypeMap.set(media.extension, media.contentType);
+    }
+    return media;
+  };
+
+  const lastHeaderFooterRid = footerReferencePlan.headerFooterRelationships?.length
+    ? Math.max(...footerReferencePlan.headerFooterRelationships.map((relationship) => Number(relationship.id.slice(3))))
+    : (footerReferencePlan.footerRelationshipStartId ?? 5) + (footerReferencePlan.footerCount ?? 0) + (footerReferencePlan.headerCount ?? 0) - 1;
+  const themeRid = lastHeaderFooterRid + 1;
+  const fontTableRid = themeRid + (includeNumbering ? 2 : 1);
+  let nextDocumentRid = fontTableRid + 1 + (includeComments ? 1 : 0);
+  const documentMediaRelationships = [];
+  const bodyPicturesByCp = new Map();
+  for (const picture of (wpsDocument.pictures ?? []).filter((candidate) => candidate.story === "body")) {
+    const media = registerMedia(picture);
+    const id = `rId${nextDocumentRid++}`;
+    documentMediaRelationships.push({ id, target: `media/${media.name}` });
+    bodyPicturesByCp.set(picture.cp, { ...picture, relationshipId: id });
+  }
+
+  for (const part of footerReferencePlan.headerFooterParts ?? []) {
+    if (!part.story) continue;
+    const story = part.story;
+    const partRelationships = [];
+    const picturesByCp = new Map();
+    let nextPartRid = 1;
+    for (const picture of (wpsDocument.pictures ?? []).filter((candidate) => candidate.story === "headers" && candidate.cp >= story.cpStart && candidate.cp < story.cpEnd)) {
+      const media = registerMedia(picture);
+      const id = `rId${nextPartRid++}`;
+      partRelationships.push({ id, target: `media/${media.name}` });
+      picturesByCp.set(picture.cp - story.cpStart, { ...picture, cp: picture.cp - story.cpStart, relationshipId: id });
+    }
+    const shapeAnchors = (wpsDocument.headerShapeAnchors ?? [])
+      .filter((shape) => shape.cpStart >= story.cpStart && shape.cpStart < story.cpEnd)
+      .map((shape) => ({ ...shape, cpStart: shape.cpStart - story.cpStart, cpEnd: shape.cpEnd - story.cpStart }));
+    const characterProperties = (wpsDocument.subdocumentCharacterProperties?.headers ?? []).slice(story.cpStart, story.cpEnd);
+    const headerRawText = wpsDocument.subdocuments?.headers?.rawText ?? "";
+    const paragraphStartIndex = [...headerRawText.slice(0, story.cpStart)].filter((character) => character === "\r").length;
+    const paragraphCount = String(story.text).split("\r").length;
+    const paragraphProperties = (wpsDocument.subdocumentParagraphProperties?.headers ?? []).slice(paragraphStartIndex, paragraphStartIndex + paragraphCount);
+    part.relationships = partRelationships;
+    part.xml = createHeaderFooterStoryXml(part.type, story, wpsDocument.fields?.headers, {
+      characterProperties,
+      paragraphProperties,
+      fontTable,
+      picturesByCp,
+      shapeAnchors,
+      textboxes: wpsDocument.textboxes?.headers,
+      textboxFields: wpsDocument.fields?.headerTextboxes,
+      textboxCharacterProperties: wpsDocument.subdocumentCharacterProperties?.headerTextboxes ?? [],
+      textboxParagraphProperties: wpsDocument.subdocumentParagraphProperties?.headerTextboxes ?? [],
+      runDefaults: { includeDefaults: false },
+    });
+  }
+
+  return {
+    mediaEntries,
+    mediaContentTypes: [...mediaContentTypeMap].map(([extension, contentType]) => ({ extension, contentType })),
+    documentMediaRelationships,
+    bodyPicturesByCp,
+  };
+}
+
+function buildPartRelationshipsXml(relationships) {
+  if (!relationships?.length) return null;
+  const parts = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+  ];
+  for (const relationship of relationships) {
+    parts.push(`  <Relationship Id="${relationship.id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="${escapeXml(relationship.target)}"/>`);
+  }
+  parts.push('</Relationships>');
+  return parts.join("\n");
+}
+
 export async function convertWpsToDocxFile(inputPath, outputPath, options = {}) {
   const wpsDocument = await readWpsFile(inputPath);
-  const docx = wpsToDocxBuffer(wpsDocument, {
-    title: options.title ?? inputPath,
-    creator: options.creator ?? "msdoc-wps-parser",
-  });
+  const docx = wpsToDocxBuffer(wpsDocument, options);
   await writeFile(outputPath, docx);
   return {
     outputPath,
@@ -958,6 +1344,10 @@ export function wpsToDocxBuffer(wpsDocument, options = {}) {
   const footerReferencePlan = createFooterReferencePlan(wpsDocument, sections);
   const bodyText = wpsDocument.bodyText ?? wpsDocument.text ?? "";
   const bookmarks = createDocumentBookmarks(wpsDocument, sections, bodyText);
+  const includeComments = (wpsDocument.comments?.comments?.length ?? 0) > 0;
+  const noteReferences = createNoteReferenceMap(wpsDocument.footnotes, wpsDocument.endnotes);
+  const commentsByReferenceCp = new Map((wpsDocument.comments?.comments ?? []).map((comment) => [comment.cp, comment]));
+  const embeddedContentPlan = prepareEmbeddedContent(wpsDocument, footerReferencePlan, includeNumbering, includeComments, fontTable);
   const documentOptions = {
     lineGridWithoutHeaderSubdocument,
     resolveCharUnitIndentFromFont: hasLineGridWithoutCharSpace,
@@ -966,6 +1356,13 @@ export function wpsToDocxBuffer(wpsDocument, options = {}) {
     fib: wpsDocument.fib,
     dop: wpsDocument.dop,
     shapeAnchors: wpsDocument.shapeAnchors ?? [],
+    picturesByCp: embeddedContentPlan.bodyPicturesByCp,
+    textboxes: wpsDocument.textboxes?.body,
+    textboxFields: wpsDocument.fields?.textboxes,
+    textboxCharacterProperties: wpsDocument.subdocumentCharacterProperties?.textboxes ?? [],
+    textboxParagraphProperties: wpsDocument.subdocumentParagraphProperties?.textboxes ?? [],
+    fontTable,
+    fieldPlan: createFieldEmissionPlan(wpsDocument.fields?.body, bodyText, "Main Document"),
     sections,
     hasIncompleteEastAsianGrid: sections.some((section) => (
       (section?.properties?.docGridType === 1 || section?.properties?.docGridType === 2)
@@ -980,6 +1377,9 @@ export function wpsToDocxBuffer(wpsDocument, options = {}) {
     suppressComplexScriptToggles: compactGridHeaderSubdocument,
     emitExtendedCharacterToggles: compactGridHeaderSubdocument,
     bookmarks,
+    comments: wpsDocument.comments?.comments ?? [],
+    commentsByReferenceCp,
+    noteReferences,
     revisionAuthors: wpsDocument.revisionAuthors ?? ["Unknown"],
 	    normalTableStyleId: styles.find((style) => style?.sti === 105)?.styleId ?? TABLE_STYLE_ID,
 	    tableGridStyleId: styles.find((style) => style?.sti === 154)?.styleId ?? null,
@@ -988,22 +1388,22 @@ export function wpsToDocxBuffer(wpsDocument, options = {}) {
   const documentXml = createDocumentXml(bodyText, paragraphProperties, characterProperties, fontTable, sections, tableRows, documentOptions);
   const stylesXml = createStylesXml(styles, fontTable, wpsDocument);
   const fontTableXml = createFontTableXml(fontTable);
-  const now = new Date().toISOString();
-  const coreXml = createCoreXml({
-    title: options.title ?? "Converted WPS document",
-    creator: options.creator ?? "msdoc-wps-parser",
-    created: options.created ?? now,
-    modified: options.modified ?? now,
-  });
+  const metadata = { ...(wpsDocument.metadata ?? {}) };
+  for (const key of ["title", "subject", "creator", "keywords", "description", "lastModifiedBy", "revision", "created", "modified", "lastPrinted", "category", "contentStatus"]) {
+    if (options[key] != null) metadata[key] = options[key];
+  }
+  const coreXml = createCoreXml(metadata);
+  const appXml = createAppXml(metadata);
+  const customXml = createCustomPropertiesXml(metadata.customProperties ?? []);
 
   const zipEntries = [
-	    { name: "[Content_Types].xml", data: buildContentTypesXml({ footerCount: footerReferencePlan.footerCount, headerCount: footerReferencePlan.headerCount ?? 0, includeNumbering, includeNotes: footerReferencePlan.includeNotes ?? true }) },
+	    { name: "[Content_Types].xml", data: buildContentTypesXml({ footerCount: footerReferencePlan.footerCount, headerCount: footerReferencePlan.headerCount ?? 0, includeNumbering, includeNotes: footerReferencePlan.includeNotes ?? true, includeComments, mediaContentTypes: embeddedContentPlan.mediaContentTypes }) },
     { name: "_rels/", data: "" },
     { name: "_rels/.rels", data: ROOT_RELS_XML },
     { name: "docProps/", data: "" },
-    { name: "docProps/app.xml", data: APP_XML },
+    { name: "docProps/app.xml", data: appXml },
     { name: "docProps/core.xml", data: coreXml },
-    { name: "docProps/custom.xml", data: CUSTOM_XML },
+    { name: "docProps/custom.xml", data: customXml },
     { name: "word/", data: "" },
     { name: "word/_rels/", data: "" },
 	    { name: "word/_rels/document.xml.rels", data: buildDocumentRelsXml({
@@ -1013,25 +1413,39 @@ export function wpsToDocxBuffer(wpsDocument, options = {}) {
 	      footerRelationshipStartId: footerReferencePlan.footerRelationshipStartId ?? 5,
 	      includeNotes: footerReferencePlan.includeNotes ?? true,
 	      headerFooterRelationships: footerReferencePlan.headerFooterRelationships ?? null,
+        includeComments,
+        mediaRelationships: embeddedContentPlan.documentMediaRelationships,
 	    }) },
     { name: "word/document.xml", data: documentXml },
     { name: "word/fontTable.xml", data: fontTableXml },
   ];
   if (footerReferencePlan.includeNotes ?? true) {
-    zipEntries.push({ name: "word/endnotes.xml", data: ENDNOTES_XML });
+    zipEntries.push({ name: "word/endnotes.xml", data: createNotesXml("endnote", wpsDocument.endnotes, wpsDocument.fields?.endnotes) });
   }
-	  if (footerReferencePlan.footerCount > 0) {
-	    for (let i = 1; i <= footerReferencePlan.footerCount; i += 1) {
-	      zipEntries.push({ name: "word/footer" + i + ".xml", data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>' });
-	    }
-	  }
-  if ((footerReferencePlan.headerCount ?? 0) > 0) {
-    for (let i = 1; i <= footerReferencePlan.headerCount; i += 1) {
-      zipEntries.push({ name: "word/header" + i + ".xml", data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>' });
+  const parsedHeaderFooterParts = footerReferencePlan.headerFooterParts ?? [];
+  if (parsedHeaderFooterParts.length) {
+    for (const part of parsedHeaderFooterParts) {
+      zipEntries.push({ name: `word/${part.type}${part.index}.xml`, data: part.xml });
+      const relsXml = buildPartRelationshipsXml(part.relationships);
+      if (relsXml) zipEntries.push({ name: `word/_rels/${part.type}${part.index}.xml.rels`, data: relsXml });
+    }
+  } else {
+    if (footerReferencePlan.footerCount > 0) {
+      for (let i = 1; i <= footerReferencePlan.footerCount; i += 1) {
+        zipEntries.push({ name: "word/footer" + i + ".xml", data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>' });
+      }
+    }
+    if ((footerReferencePlan.headerCount ?? 0) > 0) {
+      for (let i = 1; i <= footerReferencePlan.headerCount; i += 1) {
+        zipEntries.push({ name: "word/header" + i + ".xml", data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>' });
+      }
     }
   }
   if (footerReferencePlan.includeNotes ?? true) {
-    zipEntries.push({ name: "word/footnotes.xml", data: FOOTNOTES_XML });
+    zipEntries.push({ name: "word/footnotes.xml", data: createNotesXml("footnote", wpsDocument.footnotes, wpsDocument.fields?.footnotes) });
+  }
+  if (includeComments) {
+    zipEntries.push({ name: "word/comments.xml", data: createCommentsXml(wpsDocument.comments, wpsDocument.fields?.annotations) });
   }
   if (includeNumbering) {
     zipEntries.push({ name: "word/numbering.xml", data: createNumberingXml(wpsDocument) });
@@ -1040,7 +1454,24 @@ export function wpsToDocxBuffer(wpsDocument, options = {}) {
   zipEntries.push({ name: "word/styles.xml", data: stylesXml });
   zipEntries.push({ name: "word/theme/", data: "" });
   zipEntries.push({ name: "word/theme/theme1.xml", data: THEME_XML });
+  if (embeddedContentPlan.mediaEntries.length) {
+    zipEntries.push({ name: "word/media/", data: "" });
+    for (const media of embeddedContentPlan.mediaEntries) {
+      zipEntries.push({ name: `word/media/${media.name}`, data: media.bytes });
+    }
+  }
   return createZip(zipEntries);
+}
+
+function createNoteReferenceMap(footnotes = {}, endnotes = {}) {
+  const map = new Map();
+  for (const [type, collection] of [["footnote", footnotes], ["endnote", endnotes]]) {
+    for (const reference of collection?.references ?? []) {
+      if (map.has(reference.cp)) throw new Error(`Invalid WPS document: multiple note references at CP ${reference.cp}`);
+      map.set(reference.cp, { ...reference, type });
+    }
+  }
+  return map;
 }
 
 function createDocumentBookmarks(wpsDocument = {}, sections = [], bodyText = "") {
@@ -1504,12 +1935,16 @@ function tableRowToXml(row, rawText, paragraphProperties, paragraphRanges, chara
 function tableCellToXml(cell, rawText, paragraphProperties, paragraphRanges, characterProperties, fontTable, table = null, cellIndex = 0, row = null, documentOptions = {}) {
   const gridSpanXml = cell.gridSpan && cell.gridSpan > 1 ? `\n          <w:gridSpan w:val="${cell.gridSpan}"/>` : "";
   const vMergeXml = cell.vMerge === "restart" ? `\n          <w:vMerge w:val="restart"/>` : cell.vMerge === "continue" ? `\n          <w:vMerge w:val="continue"/>` : "";
+  const hMergeXml = cell.hMerge === "restart" ? `\n          <w:hMerge w:val="restart"/>` : cell.hMerge === "continue" ? `\n          <w:hMerge w:val="continue"/>` : "";
   const vAlign = cell.vAlign || "center";
   const tcBordersXml = buildCellBordersXml(table, cell, cellIndex, documentOptions);
   const shadingXml = cell.shading ? `\n          <w:shd w:val="${cell.shading.val}" w:color="${cell.shading.color}" w:fill="${cell.shading.fill}"/>` : "";
   const tcWidthXml = buildTableCellWidthXml(table, row, cell, cellIndex);
   const noWrapXml = cell.noWrap === true ? `<w:noWrap/>` : `<w:noWrap w:val="0"/>`;
-  const tcPrXml = `        <w:tcPr>\n          ${tcWidthXml}${gridSpanXml}${vMergeXml}${tcBordersXml}${shadingXml}\n          ${noWrapXml}\n          <w:vAlign w:val="${vAlign}"/>\n        </w:tcPr>\n`;
+  const textDirectionXml = cell.textDirection ? `\n          <w:textDirection w:val="${cell.textDirection}"/>` : "";
+  const fitTextXml = cell.fitText ? `\n          <w:tcFitText/>` : "";
+  const hideMarkXml = cell.hideMark ? `\n          <w:hideMark/>` : "";
+  const tcPrXml = `        <w:tcPr>\n          ${tcWidthXml}${gridSpanXml}${hMergeXml}${vMergeXml}${tcBordersXml}${shadingXml}${textDirectionXml}${fitTextXml}${hideMarkXml}\n          ${noWrapXml}\n          <w:vAlign w:val="${vAlign}"/>\n        </w:tcPr>\n`;
   const bookmarkStartXml = "";
   const bookmarkEndXml = "";
   // MS-DOC-SPEC/16 stores table-header text formatting in CHPX/paragraph-mark
@@ -1641,6 +2076,7 @@ function tableCellParagraphToXml(paragraph, properties, characterProperties, fon
   );
   const pid = nextParaId();
   const bookmarkEvents = buildBookmarkEventsForParagraph(paragraphOptions.bookmarks ?? [], paragraph);
+  addCommentRangeEvents(bookmarkEvents, paragraphOptions.comments ?? [], paragraph);
 
   if (!paragraph.text || paragraph.text.length === 0) {
     return `        <w:p w14:paraId="${pid}">\n${pPrXml}${bookmarkTagsAtCp(bookmarkEvents, paragraph.cpStart)}        </w:p>\n`;
@@ -1792,7 +2228,7 @@ function cleanParagraphText(text) {
   // MS-DOC-SPEC/15 PlcfSpa anchors are represented in the text stream by
   // anchor characters at their CPs; keep 0x08 so buildRuns can emit the
   // corresponding parsed Spa object without shifting later CPs.
-  return text.replace(/[\x00-\x06\x0d\x0f-\x12\x16-\x1f]/g, "");
+  return text.replace(/[\x00-\x01\x03-\x04\x06\x0d\x0f-\x12\x16-\x1f]/g, "");
 }
 
 function paragraphToXml(paragraph, properties, characterProperties, fontTable, charIdx, sectionProperties = null, spacingSectionProperties = sectionProperties, sectionIndex = -1, paraId = null, documentOptions = {}) {
@@ -1801,6 +2237,7 @@ function paragraphToXml(paragraph, properties, characterProperties, fontTable, c
     ? (characterProperties[paragraph.cpEnd] ?? characterProperties[paragraph.cpEnd - 1] ?? characterProperties[charIdx + charCount] ?? null)
     : (characterProperties[paragraph.cpEnd - 1] ?? characterProperties[charIdx + charCount] ?? null);
   const bookmarkEvents = buildBookmarkEventsForParagraph(documentOptions.bookmarks ?? [], paragraph);
+  addCommentRangeEvents(bookmarkEvents, documentOptions.comments ?? [], paragraph);
   const paragraphOptions = withParagraphSectionOptions(documentOptions, spacingSectionProperties);
   const pPr = buildParagraphPropertiesXml(
     properties,
@@ -1896,6 +2333,40 @@ function buildBookmarkEventsForParagraph(bookmarks, paragraph) {
   return events;
 }
 
+function addCommentRangeEvents(events, comments, paragraph) {
+  if (!events || !comments?.length) return;
+  const textStart = paragraph.cpStart;
+  const textEnd = paragraph.cpStart + paragraph.text.length;
+  const paragraphEnd = paragraph.cpEnd;
+  for (const comment of comments) {
+    if (comment.cpStart === comment.cpEnd) {
+      if (comment.cpStart >= textStart && comment.cpStart <= paragraphEnd) {
+        const cp = Math.min(comment.cpStart, textEnd);
+        const tags = events.collapsed.get(cp) ?? [];
+        tags.push({
+          hidden: false,
+          id: comment.id,
+          xml: `<w:commentRangeStart w:id="${comment.id}"/><w:commentRangeEnd w:id="${comment.id}"/>`,
+        });
+        events.collapsed.set(cp, tags);
+      }
+      continue;
+    }
+    if (comment.cpStart >= textStart && comment.cpStart <= paragraphEnd) {
+      const cp = Math.min(comment.cpStart, textEnd);
+      const tags = events.starts.get(cp) ?? [];
+      tags.push(`<w:commentRangeStart w:id="${comment.id}"/>`);
+      events.starts.set(cp, tags);
+    }
+    if (comment.cpEnd >= textStart && comment.cpEnd <= paragraphEnd) {
+      const cp = Math.min(comment.cpEnd, textEnd);
+      const tags = events.ends.get(cp) ?? [];
+      tags.push(`<w:commentRangeEnd w:id="${comment.id}"/>`);
+      events.ends.set(cp, tags);
+    }
+  }
+}
+
 function bookmarkPairXml(bookmark) {
   return {
     hidden: bookmark.name?.startsWith("_") === true,
@@ -1920,6 +2391,41 @@ function buildRuns(paragraph, characterProperties, fontTable, charIdx, paragraph
   let inFieldInstruction = false;
 
   for (const part of parts) {
+    if (part === "\x01") {
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      const picture = documentOptions.picturesByCp?.get(currentCharIdx);
+      if (!picture) throw new Error(`Invalid Main Document: picture character at CP ${currentCharIdx} has no parsed PICF data`);
+      const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
+      runs.push(`<w:r>${rPr}${buildInlinePictureXml(picture)}</w:r>`);
+      currentCharIdx += 1;
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      continue;
+    }
+    if (part === "\x02") {
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      const reference = documentOptions.noteReferences?.get(currentCharIdx);
+      if (!reference) throw new Error(`Invalid Main Document: note reference character at CP ${currentCharIdx} is absent from its reference PLC`);
+      const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
+      const customAttr = reference.automatic ? "" : ' w:customMarkFollows="1"';
+      runs.push(`<w:r>${rPr}<w:${reference.type}Reference w:id="${reference.id}"${customAttr}/></w:r>`);
+      if (!reference.automatic) {
+        const props = runOverrides ? { ...(characterProperties[currentCharIdx] ?? {}), ...runOverrides } : characterProperties[currentCharIdx];
+        runs.push(buildSymbolRun(props, fontTable, rPr, 1));
+      }
+      currentCharIdx += 1;
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      continue;
+    }
+    if (part === "\x05") {
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      const comment = documentOptions.commentsByReferenceCp?.get(currentCharIdx);
+      if (!comment) throw new Error(`Invalid Main Document: comment reference character at CP ${currentCharIdx} is absent from PlcfandRef`);
+      const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
+      runs.push(`<w:r>${rPr}<w:commentReference w:id="${comment.id}"/></w:r>`);
+      currentCharIdx += 1;
+      runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
+      continue;
+    }
     if (part === "\t") {
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
@@ -1939,7 +2445,7 @@ function buildRuns(paragraph, characterProperties, fontTable, charIdx, paragraph
       const shape = findShapeAnchorAtCp(documentOptions.shapeAnchors, currentCharIdx);
       if (shape) {
         const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
-        runs.push(`<w:r>${rPr}${buildLineShapeAnchorXml(shape)}</w:r>`);
+        runs.push(`<w:r>${rPr}${buildShapeAnchorXml(shape, documentOptions)}</w:r>`);
       }
       currentCharIdx += 1;
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
@@ -1979,7 +2485,8 @@ function buildRuns(paragraph, characterProperties, fontTable, charIdx, paragraph
     if (part === "\x13") {
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
-      runs.push(`<w:r>${rPr}<w:fldChar w:fldCharType="begin"/></w:r>`);
+      const fieldRecord = requireFieldRecord(documentOptions.fieldPlan, currentCharIdx, 0x13, "Main Document");
+      runs.push(`<w:r>${buildFieldCharXml(fieldRecord, rPr)}</w:r>`);
       currentCharIdx += 1;
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       inFieldInstruction = true;
@@ -1989,7 +2496,8 @@ function buildRuns(paragraph, characterProperties, fontTable, charIdx, paragraph
     if (part === "\x14") {
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
-      runs.push(`<w:r>${rPr}<w:fldChar w:fldCharType="separate"/></w:r>`);
+      const fieldRecord = requireFieldRecord(documentOptions.fieldPlan, currentCharIdx, 0x14, "Main Document");
+      runs.push(`<w:r>${buildFieldCharXml(fieldRecord, rPr)}</w:r>`);
       currentCharIdx += 1;
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       inFieldInstruction = false;
@@ -1999,7 +2507,8 @@ function buildRuns(paragraph, characterProperties, fontTable, charIdx, paragraph
     if (part === "\x15") {
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       const rPr = buildRunPropertiesXml(characterProperties, fontTable, currentCharIdx, runOverrides, runDefaults);
-      runs.push(`<w:r>${rPr}<w:fldChar w:fldCharType="end"/></w:r>`);
+      const fieldRecord = requireFieldRecord(documentOptions.fieldPlan, currentCharIdx, 0x15, "Main Document");
+      runs.push(`<w:r>${buildFieldCharXml(fieldRecord, rPr)}</w:r>`);
       currentCharIdx += 1;
       runs.push(bookmarkTagsAtCp(bookmarkEvents, currentCharIdx));
       inFieldInstruction = false;
@@ -2008,7 +2517,9 @@ function buildRuns(paragraph, characterProperties, fontTable, charIdx, paragraph
 
     // MS-DOC-SPEC/19: text between 0x13 and 0x14 is a field instruction
     // and MUST be wrapped in <w:instrText> instead of <w:t>.
-    const textTag = inFieldInstruction ? "instrText" : "t";
+    const textTag = documentOptions.fieldPlan
+      ? fieldTextTagAtCp(documentOptions.fieldPlan, currentCharIdx)
+      : (inFieldInstruction ? "instrText" : "t");
     runs.push(...buildTextRuns(part, characterProperties, fontTable, currentCharIdx, paragraphProperties, runOverrides, runDefaults, bookmarkEvents, textTag, documentOptions));
     currentCharIdx += part.length;
   }
@@ -2021,34 +2532,128 @@ function findShapeAnchorAtCp(shapeAnchors = [], cp) {
   return shapeAnchors.find((shape) => shape.cpStart === cp) ?? null;
 }
 
-function buildLineShapeAnchorXml(shape) {
+function buildInlinePictureXml(picture) {
+  if (!picture?.relationshipId) throw new Error("Invalid inline picture: missing package relationship id");
+  const cx = twipsToEmu(picture.widthTwips);
+  const cy = twipsToEmu(picture.heightTwips);
+  const shape = picture.shape ?? {};
+  const docPrId = shape.docPrId ?? shape.spid;
+  if (!Number.isInteger(docPrId)) throw new Error("Invalid inline picture: missing parsed OfficeArt shape id");
+  const name = escapeXml(shape.name ?? `Picture ${docPrId}`);
+  const description = shape.description ? ` descr="${escapeXml(shape.description)}"` : "";
+  const cropByPid = new Map((shape.properties ?? []).map((property) => [property.pid, property.value]));
+  const cropAttributes = [[256, "t"], [257, "b"], [258, "l"], [259, "r"]]
+    .filter(([pid]) => cropByPid.has(pid))
+    .map(([pid, name]) => `${name}="${Math.round(cropByPid.get(pid) / 65536 * 100000)}"`)
+    .join(" ");
+  const srcRect = cropAttributes ? `<a:srcRect ${cropAttributes}/>` : "";
+  const lineXml = buildPictureOutlineXml(picture.borders);
+  return `<w:drawing><wp:inline distT="0" distB="0" distL="114300" distR="114300"><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:docPr id="${docPrId}" name="${name}"${description}/><wp:cNvGraphicFramePr><a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/></wp:cNvGraphicFramePr><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${docPrId}" name="${name}"${description}/><pic:cNvPicPr><a:picLocks noChangeAspect="1"/></pic:cNvPicPr></pic:nvPicPr><pic:blipFill><a:blip r:embed="${picture.relationshipId}"/>${srcRect}<a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/>${lineXml}</pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>`;
+}
+
+function buildPictureOutlineXml(borders = {}) {
+  const sides = [borders?.top, borders?.left, borders?.bottom, borders?.right].filter((border) => border?.val && border.val !== "none");
+  if (!sides.length) return "<a:ln><a:noFill/></a:ln>";
+  const first = sides[0];
+  if (!sides.every((border) => border.val === first.val && border.color === first.color && border.sz === first.sz)) {
+    throw new Error("Unimplemented inline picture with non-uniform borders");
+  }
+  const width = Math.max(1, Math.round(Number(first.sz) * 12700));
+  return `<a:ln w="${width}"><a:solidFill><a:srgbClr val="${escapeXml(first.color)}"/></a:solidFill></a:ln>`;
+}
+
+function buildShapeAnchorXml(shape, options = {}) {
   const widthTwips = Math.abs(shape.xaRight - shape.xaLeft);
   const heightTwips = Math.abs(shape.yaBottom - shape.yaTop);
-  if (heightTwips !== 0) {
-    throw new Error("Unimplemented PlcfSpa shape export: non-horizontal line shape");
-  }
-  if (shape.bx !== 2 || shape.by !== 2 || shape.wr !== 3) {
-    throw new Error(`Unimplemented PlcfSpa shape export: bx=${shape.bx} by=${shape.by} wr=${shape.wr}`);
-  }
-
   const cx = twipsToEmu(widthTwips);
   const cy = twipsToEmu(heightTwips);
   const x = twipsToEmu(shape.xaLeft);
   const y = twipsToEmu(shape.yaTop);
   const officeArt = shape.officeArt;
-  if (!officeArt) {
-    throw new Error(`Invalid WPS document: missing OfficeArt shape data for Spa.lid ${shape.lid}`);
-  }
-  if (!Number.isInteger(officeArt.relativeHeight) || !Number.isInteger(officeArt.docPrId) || !officeArt.name || !officeArt.gfxData) {
+  if (!officeArt) throw new Error(`Invalid WPS document: missing OfficeArt shape data for Spa.lid ${shape.lid}`);
+  const docPrId = officeArt.docPrId ?? officeArt.spid;
+  if (!Number.isInteger(officeArt.relativeHeight) || !Number.isInteger(docPrId)) {
     throw new Error(`Invalid WPS document: incomplete OfficeArt shape data for Spa.lid ${shape.lid}`);
   }
-  const relativeHeight = officeArt.relativeHeight;
-  const docPrId = officeArt.docPrId;
-  const docPrName = escapeXml(officeArt.name);
+  const docPrName = escapeXml(officeArt.name ?? `Shape ${officeArt.spid}`);
+  const positionH = buildShapeHorizontalPositionXml(shape, x);
+  const positionV = `<wp:positionV relativeFrom="${["margin", "page", "paragraph"][shape.by]}"><wp:posOffset>${y}</wp:posOffset></wp:positionV>`;
+  const wrap = buildShapeWrapXml(shape);
+  let graphic = extractOfficeArtGraphicXml(officeArt.e2oXml, cx, cy);
+  if (officeArt.shapeType === 202) {
+    const textboxContent = buildTextboxContentXml(shape, options);
+    if (graphic) {
+      if (!graphic.includes("<wps:txbx/>")) throw new Error(`Invalid textbox e2o data for Spa.lid ${shape.lid}: missing wps:txbx placeholder`);
+      graphic = graphic.replace("<wps:txbx/>", `<wps:txbx><w:txbxContent>${textboxContent}</w:txbxContent></wps:txbx>`);
+    } else {
+      graphic = `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>${textboxContent}</w:txbxContent></wps:txbx><wps:bodyPr wrap="none" lIns="0" tIns="0" rIns="0" bIns="0" upright="0"><a:spAutoFit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic>`;
+    }
+  } else if (!graphic && officeArt.shapeType === 20) {
+    graphic = `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvCnPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic>`;
+  } else if (!graphic) {
+    throw new Error(`Unimplemented OfficeArt shape type ${officeArt.shapeType} without parsed e2o DrawingML`);
+  }
+  if (/\br:(?:embed|link)=/.test(graphic)) {
+    throw new Error(`Unimplemented OfficeArt shape ${shape.lid}: embedded e2o relationships require package transplantation`);
+  }
+  const drawing = `<w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="${officeArt.relativeHeight}" behindDoc="${shape.fBelowText ? 1 : 0}" locked="${shape.fAnchorLock ? 1 : 0}" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/>${positionH}${positionV}<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>${wrap}<wp:docPr id="${docPrId}" name="${docPrName}"/><wp:cNvGraphicFramePr/>${graphic}</wp:anchor></w:drawing>`;
+  if (officeArt.shapeType !== 20 || !officeArt.gfxData) return drawing;
   const fallbackSpid = officeArt.fallbackSpid ?? officeArt.spid;
   const gfxData = formatGfxData(officeArt.gfxData);
-  const vmlStyle = `position:absolute;left:0pt;margin-left:${formatPoints(shape.xaLeft)}pt;margin-top:${formatPoints(shape.yaTop)}pt;height:0pt;width:${formatPoints(widthTwips)}pt;z-index:${relativeHeight};mso-width-relative:page;mso-height-relative:page;`;
-  return `<mc:AlternateContent><mc:Choice Requires="wps"><w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="${relativeHeight}" behindDoc="${shape.fBelowText ? 1 : 0}" locked="${shape.fAnchorLock ? 1 : 0}" layoutInCell="0" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>${x}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>${y}</wp:posOffset></wp:positionV><wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="6350" r="0" b="6350"/><wp:wrapNone/><wp:docPr id="${docPrId}" name="${docPrName}"/><wp:cNvGraphicFramePr/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvCnPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="9525" cap="flat" cmpd="sng"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:prstDash val="solid"/><a:headEnd type="none" w="med" len="med"/><a:tailEnd type="none" w="med" len="med"/></a:ln><a:effectLst/></wps:spPr><wps:bodyPr upright="1"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:line id="_x0000_s${fallbackSpid}" o:spid="_x0000_s${fallbackSpid}" o:spt="20" style="${vmlStyle}" filled="f" stroked="t" coordsize="21600,21600" o:allowincell="f" o:gfxdata="${gfxData}"><v:fill on="f" focussize="0,0"/><v:stroke color="#000000" joinstyle="round"/><v:imagedata o:title=""/><o:lock v:ext="edit" aspectratio="f"/></v:line></w:pict></mc:Fallback></mc:AlternateContent>`;
+  const vmlStyle = `position:absolute;left:0pt;margin-left:${formatPoints(shape.xaLeft)}pt;margin-top:${formatPoints(shape.yaTop)}pt;height:${formatPoints(heightTwips)}pt;width:${formatPoints(widthTwips)}pt;z-index:${officeArt.relativeHeight};mso-width-relative:page;mso-height-relative:page;`;
+  return `<mc:AlternateContent><mc:Choice Requires="wps">${drawing}</mc:Choice><mc:Fallback><w:pict><v:line id="_x0000_s${fallbackSpid}" o:spid="_x0000_s${fallbackSpid}" o:spt="20" style="${vmlStyle}" filled="f" stroked="t" coordsize="21600,21600" o:allowincell="f" o:gfxdata="${gfxData}"><v:fill on="f" focussize="0,0"/><v:stroke color="#000000" joinstyle="round"/><v:imagedata o:title=""/><o:lock v:ext="edit" aspectratio="f"/></v:line></w:pict></mc:Fallback></mc:AlternateContent>`;
+}
+
+function buildShapeHorizontalPositionXml(shape, x) {
+  const relativeFrom = ["margin", "page", "column"][shape.bx];
+  if (!relativeFrom) throw new Error(`Out-of-spec Spa.bx ${shape.bx}`);
+  const posh = shape.officeArt?.tertiaryProperties?.find((property) => property.pid === 911)?.value;
+  if (posh != null) {
+    const align = [null, "left", "center", "right", "inside", "outside"][posh];
+    if (posh === 0) return `<wp:positionH relativeFrom="${relativeFrom}"><wp:posOffset>${x}</wp:posOffset></wp:positionH>`;
+    if (!align) throw new Error(`Out-of-spec OfficeArt posh value ${posh}`);
+    return `<wp:positionH relativeFrom="${relativeFrom}"><wp:align>${align}</wp:align></wp:positionH>`;
+  }
+  return `<wp:positionH relativeFrom="${relativeFrom}"><wp:posOffset>${x}</wp:posOffset></wp:positionH>`;
+}
+
+function buildShapeWrapXml(shape) {
+  if (shape.wr === 1) return "<wp:wrapTopAndBottom/>";
+  if (shape.wr === 3) return "<wp:wrapNone/>";
+  if (shape.wr === 0 || shape.wr === 2) {
+    const wrapText = ["bothSides", "left", "right", "largest"][shape.wrk];
+    if (!wrapText) throw new Error(`Out-of-spec Spa.wrk ${shape.wrk}`);
+    return `<wp:wrapSquare wrapText="${wrapText}"/>`;
+  }
+  throw new Error(`Unimplemented contour-based Spa.wr ${shape.wr}: no parsed wrap polygon`);
+}
+
+function extractOfficeArtGraphicXml(e2oXml, cx, cy) {
+  if (!e2oXml) return null;
+  const match = e2oXml.match(/<a:graphic\b[\s\S]*<\/a:graphic>/);
+  if (!match) throw new Error("Invalid OfficeArt e2o package: missing a:graphic");
+  return match[0]
+    .replace(/<a:off\b[^>]*\/>/, '<a:off x="0" y="0"/>')
+    .replace(/<a:ext\b[^>]*\/>/, `<a:ext cx="${cx}" cy="${cy}"/>`);
+}
+
+function buildTextboxContentXml(shape, options) {
+  const textbox = options.textboxes?.textboxes?.find((candidate) => candidate.lid === shape.lid);
+  if (!textbox) throw new Error(`Invalid textbox shape ${shape.lid}: no matching FTXBXS entry`);
+  const story = { cpStart: textbox.cpStart, cpEnd: textbox.cpStart + textbox.text.length, text: textbox.text };
+  const fieldPlc = sliceFieldPlcForStory(options.textboxFields, story);
+  const fieldPlan = createFieldEmissionPlan(fieldPlc, textbox.text, `textbox ${shape.lid}`);
+  const characterProperties = (options.textboxCharacterProperties ?? []).slice(textbox.cpStart, textbox.cpStart + textbox.text.length);
+  const textboxRawText = options.textboxes?.textboxes?.map((entry) => entry.rawText).join("") ?? "";
+  const paragraphStartIndex = [...textboxRawText.slice(0, textbox.cpStart)].filter((character) => character === "\r").length;
+  const paragraphProperties = (options.textboxParagraphProperties ?? []).slice(paragraphStartIndex, paragraphStartIndex + textbox.text.split("\r").length);
+  let cp = 0;
+  return textbox.text.split("\r").map((paragraph, paragraphIndex) => {
+    const pPr = buildParagraphPropertiesXml(paragraphProperties[paragraphIndex] ?? null, null, options.fontTable ?? [], null, null, -1, paragraph, options);
+    const runs = buildPlainStoryRuns(paragraph, cp, fieldPlan, { characterProperties, fontTable: options.fontTable ?? [], runDefaults: { includeDefaults: false } });
+    cp += paragraph.length + 1;
+    return `<w:p>${pPr}${runs}</w:p>`;
+  }).join("");
 }
 
 function twipsToEmu(twips) {
@@ -2192,7 +2797,7 @@ function splitTabsAndMarks(value) {
     // MS-DOC-SPEC/19: split on tabs, cell/para/section marks, line/col breaks,
     // and field chars (0x13 begin, 0x14 separator, 0x15 end). 0x08 is a
     // shape-anchor character whose metadata comes from MS-DOC PlcfSpa.
-    if (value[i] === "\t" || value[i] === "\x07" || value[i] === "\x08" || value[i] === "\x0b" || value[i] === "\x0c" || value[i] === "\x0e" || value[i] === "\x13" || value[i] === "\x14" || value[i] === "\x15") {
+    if (value[i] === "\t" || value[i] === "\x01" || value[i] === "\x02" || value[i] === "\x05" || value[i] === "\x07" || value[i] === "\x08" || value[i] === "\x0b" || value[i] === "\x0c" || value[i] === "\x0e" || value[i] === "\x13" || value[i] === "\x14" || value[i] === "\x15") {
       if (i > start) {
         parts.push(value.slice(start, i));
       }
@@ -2569,15 +3174,18 @@ function buildRunPropertiesXmlFromProps(props, fontTable, { includeDefaults, emi
   if (props.langId != null || props.langIdEastAsia != null || props.langIdBidi != null) {
     const langAttrs = [];
     if (props.langId != null) {
-      langAttrs.push(`w:val="${langIdToBcp47(props.langId)}"`);
+      const tag = langIdToBcp47(props.langId);
+      if (tag) langAttrs.push(`w:val="${tag}"`);
     }
     if (props.langIdEastAsia != null) {
-      langAttrs.push(`w:eastAsia="${langIdToBcp47(props.langIdEastAsia)}"`);
+      const tag = langIdToBcp47(props.langIdEastAsia);
+      if (tag) langAttrs.push(`w:eastAsia="${tag}"`);
     }
     if (props.langIdBidi != null) {
-      langAttrs.push(`w:bidi="${langIdToBcp47(props.langIdBidi)}"`);
+      const tag = langIdToBcp47(props.langIdBidi);
+      if (tag) langAttrs.push(`w:bidi="${tag}"`);
     }
-    parts.push(`<w:lang ${langAttrs.join(" ")}/>`);
+    parts.push(langAttrs.length ? `<w:lang ${langAttrs.join(" ")}/>` : `<w:lang/>`);
   }
 
   if (props.eastAsianLayout != null) {
@@ -2614,6 +3222,10 @@ function appendToggleRunProperty(parts, name, value) {
 }
 
 function langIdToBcp47(langId) {
+  // MS-LCID 0x0400 is LOCALE_USER_DEFAULT rather than a concrete language.
+  // WPS preserves that explicit MS-DOC LID as an empty OOXML w:lang element.
+  // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-lcid/
+  if (langId === 0x0400) return "";
   // MS-DOC-SPEC/16 §sprmCRgLid0/sprmCRgLid1 stores a LID value.
   // Map concrete LCIDs via MS-OE376 ST_LangCode and unique MS-LCID rows.
   const tag = lcidToBcp47(langId);
@@ -3030,11 +3642,20 @@ function buildSectionPropertiesXml(properties = {}, { defaultFooterId, evenFoote
     parts.push(paperSourceXml);
   }
   if (section.pageBorders) {
-    const sides = ["top", "left", "bottom", "right"];
-    if (!sides.every((side) => section.pageBorders[side]?.style === "none")) {
-      throw new Error("Unimplemented section page border emission for partial or non-empty page borders");
+    const borderProperties = section.pageBorderProperties ?? null;
+    const borderParts = [];
+    for (const side of ["top", "left", "bottom", "right"]) {
+      const border = section.pageBorders[side];
+      if (!border) continue;
+      const borderVal = border.val ?? border.style;
+      const colorAttr = borderVal === "none" && border.color == null ? "" : ` w:color="${escapeXml(border.color ?? "auto")}"`;
+      borderParts.push(`<w:${side} w:val="${escapeXml(borderVal)}" w:sz="${escapeXml(border.sz ?? "0")}" w:space="${escapeXml(border.space ?? "0")}"${colorAttr}${border.shadow ? ' w:shadow="1"' : ''}${border.frame ? ' w:frame="1"' : ''}/>`);
     }
-    parts.push(`<w:pgBorders>${sides.map((side) => `<w:${side} w:val="none" w:sz="0" w:space="0"/>`).join("")}</w:pgBorders>`);
+    if (borderParts.length) {
+      const isDefaultBorderProperties = !borderProperties || (borderProperties.display === "allPages" && borderProperties.offsetFrom === "text" && borderProperties.zOrder === "front");
+      const attrs = isDefaultBorderProperties ? "" : ` w:display="${borderProperties.display}" w:offsetFrom="${borderProperties.offsetFrom}" w:zOrder="${borderProperties.zOrder}"`;
+      parts.push(`<w:pgBorders${attrs}>${borderParts.join("")}</w:pgBorders>`);
+    }
   }
   const lineNumberXml = buildSectionLineNumberXml(section);
   if (lineNumberXml) {
@@ -3755,15 +4376,74 @@ function needsPreservedSpace(value) {
   return /^[\t\n\r ]|[\t\n\r ]$/.test(value);
 }
 
-function createCoreXml({ title, creator, created, modified }) {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <dc:title>${escapeXml(title)}</dc:title>
-  <dc:creator>${escapeXml(creator)}</dc:creator>
-  <cp:lastModifiedBy>${escapeXml(creator)}</cp:lastModifiedBy>
-  <dcterms:created xsi:type="dcterms:W3CDTF">${escapeXml(created)}</dcterms:created>
-  <dcterms:modified xsi:type="dcterms:W3CDTF">${escapeXml(modified)}</dcterms:modified>
-</cp:coreProperties>`;
+function createCoreXml(metadata = {}) {
+  const parts = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">',
+  ];
+  const textProperties = [
+    ["title", "dc:title"], ["subject", "dc:subject"], ["creator", "dc:creator"],
+    ["keywords", "cp:keywords"], ["description", "dc:description"],
+    ["lastModifiedBy", "cp:lastModifiedBy"], ["revision", "cp:revision"],
+    ["category", "cp:category"], ["contentStatus", "cp:contentStatus"],
+    ["documentVersion", "cp:version"],
+  ];
+  for (const [key, element] of textProperties) {
+    if (metadata[key] != null && metadata[key] !== "") parts.push(`  <${element}>${escapeXml(String(metadata[key]))}</${element}>`);
+  }
+  for (const [key, element] of [["lastPrinted", "cp:lastPrinted"], ["created", "dcterms:created"], ["modified", "dcterms:modified"]]) {
+    if (metadata[key]) {
+      const type = element.startsWith("dcterms:") ? ' xsi:type="dcterms:W3CDTF"' : "";
+      parts.push(`  <${element}${type}>${escapeXml(metadata[key])}</${element}>`);
+    }
+  }
+  parts.push('</cp:coreProperties>');
+  return parts.join("\n");
+}
+
+function createAppXml(metadata = {}) {
+  const parts = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">',
+  ];
+  const values = [
+    ["template", "Template"], ["manager", "Manager"], ["company", "Company"],
+    ["pages", "Pages"], ["words", "Words"], ["characters", "Characters"],
+    ["lines", "Lines"], ["paragraphs", "Paragraphs"],
+    ["charactersWithSpaces", "CharactersWithSpaces"],
+    ["application", "Application"], ["security", "DocSecurity"],
+  ];
+  for (const [key, element] of values) {
+    if (metadata[key] != null && metadata[key] !== "") parts.push(`  <${element}>${escapeXml(String(metadata[key]))}</${element}>`);
+  }
+  parts.push('</Properties>');
+  return parts.join("\n");
+}
+
+function createCustomPropertiesXml(customProperties = []) {
+  const parts = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">',
+  ];
+  let pid = 2;
+  for (const property of customProperties) {
+    const valueXml = customPropertyValueXml(property.value);
+    if (!valueXml) continue;
+    parts.push(`  <property fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}" pid="${pid++}" name="${escapeXml(property.name)}">${valueXml}</property>`);
+  }
+  parts.push('</Properties>');
+  return parts.join("\n");
+}
+
+function customPropertyValueXml(value) {
+  if (typeof value === "string") {
+    if (/^\d{4}-\d{2}-\d{2}T/.test(value)) return `<vt:filetime>${escapeXml(value)}</vt:filetime>`;
+    return `<vt:lpwstr>${escapeXml(value)}</vt:lpwstr>`;
+  }
+  if (typeof value === "boolean") return `<vt:bool>${value}</vt:bool>`;
+  if (Number.isInteger(value)) return `<vt:i4>${value}</vt:i4>`;
+  if (typeof value === "number" && Number.isFinite(value)) return `<vt:r8>${value}</vt:r8>`;
+  return null;
 }
 
 function createZip(entries) {
